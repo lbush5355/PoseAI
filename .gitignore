@@ -1,0 +1,12 @@
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Large molecular data (keep your repo clean!)
+data/*.sdf
+data/*.pdb
+data/*.pdbqt
+outputs/
+
+# macOS system files
+.DS_Store

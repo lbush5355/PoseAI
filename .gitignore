@@ -2,11 +2,33 @@
 __pycache__/
 *.pyc
 
-# Large molecular data (keep your repo clean!)
-data/*.sdf
-data/*.pdb
-data/*.pdbqt
+# Virtual Environments
+poseai_intel/
+venv/
+.env
+
+# Large molecular data
+# This ignores the entire data directory and all subfolders
+data/
 outputs/
+
+# Bioinformatic file types (Safety catch-all)
+*.sdf
+*.pdb
+*.pdbqt
+*.dlg
+*.dok
+*.in
+*.map
+*.gpf
+*.dpf
+
+# Executables and Binaries
+# We exclude these so the repo remains platform-independent
+bin/lepro
+bin/ledock
+bin/gnina
+bin/smina
 
 # macOS system files
 .DS_Store

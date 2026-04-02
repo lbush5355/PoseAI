@@ -1,22 +1,34 @@
+import os
 from src.preprocessor import PoseAIPreprocessor
 from src.detector import PocketDetector
+from src.docking import DockingManager
 
-def test_pipeline():
+def main():
     target = "1iep"
     print(f"--- PoseAI Pipeline: {target.upper()} ---")
     
-    # 1. Preprocess
+    # 1. Preprocessing
     prep = PoseAIPreprocessor(target)
-    prep.run_all()
-    
-    # 2. Detect Coordinates
+    if not prep.run_all():
+        return
+
+    # 2. Detection
     detector = PocketDetector(target)
     center = detector.detect_from_ligand()
     
     if center is not None:
-        print(f"Result: Binding Site Centroid at X:{center[0]} Y:{center[1]} Z:{center[2]}")
+        # For testing, we use the raw PDB as the ligand source
+        # Smina is smart enough to extract HETATMs if pointed at the raw PDB
+        ligand_ref = os.path.abspath(os.path.join("data", target, f"{target}.pdb"))
+        
+        # 3. Docking
+        docker = DockingManager(target, center)
+        if docker.run_all(ligand_ref):
+            print("\n--- Pipeline Complete: Results ready for Consensus Scoring ---")
+        else:
+            print("\n--- Pipeline Error: One or more engines failed ---")
     else:
-        print("Result: Automated detection failed. Fallback required.")
+        print("Error: No binding site detected.")
 
 if __name__ == "__main__":
-    test_pipeline()
+    main()

@@ -1,0 +1,15 @@
+name: poseai_intel
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - smina
+  - autodock
+  - openbabel
+  - mgltools
+  - biopython
+  - fpocket
+  - scikit-learn
+  - pandas
+  - numpy

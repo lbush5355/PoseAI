@@ -1,0 +1,23 @@
+# Datasets and Results (Too large for GitHub)
+dataset/
+results/
+batch_results/
+fast_lane/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment and IDE
+.ipynb_checkpoints/
+.env
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+bin/

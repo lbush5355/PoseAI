@@ -1,0 +1,14 @@
+name: poseai
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - rdkit
+  - openbabel
+  - numpy
+  - pandas
+  - hdbscan
+  - pip
+  - pip:
+    - py3Dmol

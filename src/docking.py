@@ -1,0 +1,724 @@
+"""PoseAI Docking Module — High-Concurrency Ensemble Execution Engine.
+
+Orchestrates Smina, Gnina, and LeDock backends through a parallel execution
+model optimized for high-vCPU Colab Pro environments. Manages hardware 
+partitioning, asynchronous logging, timeouts, and provides a unified interface 
+for consensus scoring.
+
+v2.0 — Refactored for robustness, timeout safety, and adaptive resource 
+allocation.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import threading
+import time
+from concurrent.futures import ProcessPoolExecutor, Future, as_completed
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+# ---------------------------------------------------------------------------
+# Module-level logger
+# ---------------------------------------------------------------------------
+logger = logging.getLogger("poseai.docking")
+
+
+# ---------------------------------------------------------------------------
+# Configuration Constants
+# ---------------------------------------------------------------------------
+class DockingConfig:
+    """Configuration parameters for docking execution."""
+    
+    # Resource allocation (% of total CPUs)
+    # These are defaults; can be overridden via HardwareProfile
+    GNINA_CPU_FRACTION = 0.17      # GPU does most heavy lifting
+    GNINA_CPU_FRACTION_NO_GPU = 0.25  # Fallback if no CUDA
+    SMINA_CPU_FRACTION = 0.42
+    RESERVED_CPU_FRACTION = 1.0    # Min 1 CPU reserved for system
+    
+    # Timeout enforcement
+    DEFAULT_ENGINE_TIMEOUT = 3600.0  # 1 hour per engine
+    POOL_TIMEOUT_FACTOR = 1.5        # Pool timeout = engine_timeout * factor
+    
+    # Process management
+    DEFAULT_POLL_INTERVAL = 0.5  # Seconds between future checks
+    STREAM_BUFFER_LIMIT = 50_000  # Max log lines per engine
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+class EngineType(Enum):
+    """Enumeration of supported docking back-ends."""
+    SMINA = auto()
+    GNINA = auto()
+    LEDOCK = auto()
+
+
+@dataclass(frozen=True)
+class DockingResult:
+    """Container for engine execution metadata."""
+    engine: EngineType
+    return_code: int
+    wall_time_s: float
+    output_path: str
+    stdout_log: str = ""
+    stderr_log: str = ""
+    success: bool = False
+    timeout_occurred: bool = False  # New field
+
+
+@dataclass
+class HardwareProfile:
+    """Adaptive resource allocation profile for CPU/GPU partitioning.
+    
+    Automatically detects CUDA availability and allocates threads
+    proportionally. Can be manually overridden for testing.
+    
+    Parameters
+    ----------
+    total_cpus : int, optional
+        Total CPUs available. Defaults to os.cpu_count().
+    gnina_threads : int, optional
+        Override Gnina allocation (0 = auto).
+    smina_threads : int, optional
+        Override Smina allocation (0 = auto).
+    ledock_threads : int, optional
+        Override LeDock allocation (0 = auto).
+    gpu_available : bool, optional
+        Force GPU availability check (for testing).
+    """
+    
+    total_cpus: int = field(default_factory=lambda: os.cpu_count() or 4)
+    gnina_threads: int = 0
+    smina_threads: int = 0
+    ledock_threads: int = 0
+    gpu_available: bool = field(default_factory=lambda: HardwareProfile._check_cuda())
+
+    def __post_init__(self) -> None:
+        """Partition threads intelligently to prevent resource contention."""
+        # If all are already specified, validate and return
+        if self.gnina_threads > 0 and self.smina_threads > 0 and self.ledock_threads > 0:
+            self._validate()
+            return
+        
+        logger.info(f"Configuring hardware: {self.total_cpus} CPUs, GPU={'available' if self.gpu_available else 'unavailable'}")
+        
+        # Reserve CPUs for system
+        reserved = max(1, int(DockingConfig.RESERVED_CPU_FRACTION))
+        available = self.total_cpus - reserved
+        
+        # Gnina allocation depends on GPU availability
+        if self.gpu_available:
+            gnina_fraction = DockingConfig.GNINA_CPU_FRACTION
+        else:
+            gnina_fraction = DockingConfig.GNINA_CPU_FRACTION_NO_GPU
+            logger.warning("GPU not available; increasing Gnina CPU allocation")
+        
+        if self.gnina_threads == 0:
+            self.gnina_threads = max(1, int(available * gnina_fraction))
+        
+        # Remaining CPUs split between Smina and LeDock
+        remaining = available - self.gnina_threads
+        
+        if self.smina_threads == 0:
+            self.smina_threads = max(1, int(remaining * DockingConfig.SMINA_CPU_FRACTION))
+        
+        if self.ledock_threads == 0:
+            self.ledock_threads = max(1, remaining - self.smina_threads)
+        
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate thread allocation."""
+        total = self.gnina_threads + self.smina_threads + self.ledock_threads
+        reserved = max(1, int(DockingConfig.RESERVED_CPU_FRACTION))
+        
+        if total > self.total_cpus - reserved:
+            raise ValueError(
+                f"Thread allocation exceeds available CPUs: "
+                f"gnina={self.gnina_threads} + smina={self.smina_threads} + "
+                f"ledock={self.ledock_threads} > {self.total_cpus - reserved}"
+            )
+        
+        logger.info(
+            f"Hardware allocation: gnina={self.gnina_threads}, "
+            f"smina={self.smina_threads}, ledock={self.ledock_threads} "
+            f"(reserved={reserved})"
+        )
+
+    @staticmethod
+    def _check_cuda() -> bool:
+        """Check for NVIDIA GPU via nvidia-smi.
+        
+        Returns
+        -------
+        bool
+            True if nvidia-smi returns 0.
+        """
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--list-gpus"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            available = result.returncode == 0 and result.stdout.strip()
+            if available:
+                logger.info("CUDA GPU detected")
+            return available
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous stream reader
+# ---------------------------------------------------------------------------
+class _AsyncStreamReader:
+    """Non-blocking line reader for subprocess pipes."""
+    
+    def __init__(
+        self,
+        stream,
+        log: logging.Logger,
+        level: int = logging.DEBUG,
+        prefix: str = "",
+        max_lines: int = DockingConfig.STREAM_BUFFER_LIMIT,
+    ) -> None:
+        self._lines: list[str] = []
+        self._lock = threading.Lock()
+        self._max_lines = max_lines
+        self._thread = threading.Thread(
+            target=self._reader,
+            args=(stream, log, level, prefix),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _reader(self, stream, log: logging.Logger, level: int, prefix: str) -> None:
+        """Read lines from stream, logging and buffering."""
+        try:
+            for raw_line in iter(stream.readline, ""):
+                line = raw_line.rstrip("\n")
+                log.log(level, "%s%s", prefix, line)
+                with self._lock:
+                    if len(self._lines) < self._max_lines:
+                        self._lines.append(line)
+                    elif len(self._lines) == self._max_lines:
+                        # Log once when buffer fills
+                        logger.warning(
+                            f"Stream buffer full ({self._max_lines} lines); "
+                            f"further output discarded"
+                        )
+        except ValueError:
+            # Stream closed
+            pass
+
+    def join(self, timeout: float = 30.0) -> None:
+        """Wait for reader thread to finish."""
+        self._thread.join(timeout=timeout)
+
+    @property
+    def output(self) -> str:
+        """Get buffered output as string."""
+        with self._lock:
+            return "\n".join(self._lines)
+
+
+# ---------------------------------------------------------------------------
+# Subprocess executor
+# ---------------------------------------------------------------------------
+def _execute_engine(
+    cmd: List[str],
+    engine_name: str,
+    output_path: str,
+    timeout: Optional[float] = None,
+    env_overrides: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+) -> DockingResult:
+    """Managed subprocess execution with signal propagation and timeout.
+    
+    Parameters
+    ----------
+    cmd : List[str]
+        Command and arguments.
+    engine_name : str
+        Engine name (for logging and result type).
+    output_path : str
+        Expected output file path.
+    timeout : float, optional
+        Timeout in seconds. Defaults to DockingConfig.DEFAULT_ENGINE_TIMEOUT.
+    env_overrides : dict, optional
+        Environment variable overrides.
+    cwd : str, optional
+        Working directory for subprocess.
+        
+    Returns
+    -------
+    DockingResult
+        Execution result with exit code, logs, and success flag.
+    """
+    engine_type = EngineType[engine_name.upper()]
+    child_logger = logging.getLogger(f"poseai.docking.{engine_name.lower()}")
+    
+    if timeout is None:
+        timeout = DockingConfig.DEFAULT_ENGINE_TIMEOUT
+
+    env = dict(os.environ)
+    if env_overrides:
+        env.update(env_overrides)
+
+    child_logger.info("Launching: %s", " ".join(cmd))
+    t_start = time.monotonic()
+    timeout_occurred = False
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=cwd,
+            preexec_fn=os.setsid,  # Create process group for signal handling
+        )
+
+        stdout_reader = _AsyncStreamReader(
+            proc.stdout, child_logger, logging.DEBUG, prefix=f"[{engine_name}:out] "
+        )
+        stderr_reader = _AsyncStreamReader(
+            proc.stderr, child_logger, logging.WARNING, prefix=f"[{engine_name}:err] "
+        )
+
+        try:
+            return_code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Timeout occurred — terminate process group
+            timeout_occurred = True
+            child_logger.error(f"Timeout ({timeout}s) exceeded; terminating process group")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                time.sleep(1)
+                if proc.poll() is None:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return_code = -1
+
+        stdout_reader.join()
+        stderr_reader.join()
+
+        return DockingResult(
+            engine=engine_type,
+            return_code=return_code,
+            wall_time_s=time.monotonic() - t_start,
+            output_path=output_path,
+            stdout_log=stdout_reader.output,
+            stderr_log=stderr_reader.output,
+            success=(return_code == 0),
+            timeout_occurred=timeout_occurred,
+        )
+        
+    except Exception as exc:
+        child_logger.error("Execution failure for %s: %s", engine_name, exc, exc_info=True)
+        return DockingResult(
+            engine=engine_type,
+            return_code=-1,
+            wall_time_s=time.monotonic() - t_start,
+            output_path=output_path,
+            success=False,
+            timeout_occurred=timeout_occurred,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Primary public class
+# ---------------------------------------------------------------------------
+class EnsembleManager:
+    """Orchestrator for parallel multi-engine molecular docking.
+    
+    Parameters
+    ----------
+    bin_dir : str
+        Directory containing docking engine binaries.
+    hardware : HardwareProfile, optional
+        Resource allocation profile. Auto-created if None.
+    """
+
+    def __init__(
+        self,
+        bin_dir: str = "/content/fast_lane/bin",
+        hardware: Optional[HardwareProfile] = None,
+    ) -> None:
+        self._bin = Path(bin_dir)
+        self.smina_bin = str(self._bin / "smina")
+        self.gnina_bin = str(self._bin / "gnina")
+        self.ledock_bin = str(self._bin / "ledock")
+        self.lepro_bin = str(self._bin / "lepro")
+        self.hw = hardware or HardwareProfile()
+        self._validate_binaries()
+
+    def _validate_binaries(self) -> None:
+        """Verify all required binaries exist and are executable."""
+        for label, path in [
+            ("smina", self.smina_bin),
+            ("gnina", self.gnina_bin),
+            ("ledock", self.ledock_bin),
+            ("lepro", self.lepro_bin),
+        ]:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Binary missing: {path}")
+            if not os.access(path, os.X_OK):
+                raise PermissionError(f"Binary not executable: {path}")
+        logger.info("All binaries validated")
+
+    @staticmethod
+    def _ensure_dir(path: str) -> None:
+        """Create directory (idempotent)."""
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+    def run_smina(
+        self,
+        receptor: str,
+        ligand: str,
+        center: Tuple[float, float, float],
+        box_size: Tuple[float, float, float],
+        output_dir: str,
+        exhaustiveness: int = 8,
+        num_modes: int = 9,
+        timeout: Optional[float] = None,
+    ) -> DockingResult:
+        """Execute Smina docking.
+        
+        Parameters
+        ----------
+        receptor : str
+            Receptor PDBQT path.
+        ligand : str
+            Ligand PDBQT path.
+        center : (float, float, float)
+            Box center coordinates.
+        box_size : (float, float, float)
+            Box dimensions.
+        output_dir : str
+            Output directory.
+        exhaustiveness : int
+            Search exhaustiveness (1-8).
+        num_modes : int
+            Number of output poses.
+        timeout : float, optional
+            Timeout in seconds.
+            
+        Returns
+        -------
+        DockingResult
+        """
+        self._ensure_dir(output_dir)
+        output_path = os.path.join(output_dir, "smina_poses.sdf")
+        cmd = [
+            self.smina_bin,
+            "--receptor", receptor,
+            "--ligand", ligand,
+            "--center_x", str(center[0]),
+            "--center_y", str(center[1]),
+            "--center_z", str(center[2]),
+            "--size_x", str(box_size[0]),
+            "--size_y", str(box_size[1]),
+            "--size_z", str(box_size[2]),
+            "--out", output_path,
+            "--exhaustiveness", str(exhaustiveness),
+            "--num_modes", str(num_modes),
+            "--cpu", str(self.hw.smina_threads),
+        ]
+        return _execute_engine(cmd, "SMINA", output_path, timeout=timeout)
+
+    def run_gnina(
+        self,
+        receptor: str,
+        ligand: str,
+        center: Tuple[float, float, float],
+        box_size: Tuple[float, float, float],
+        output_dir: str,
+        exhaustiveness: int = 8,
+        num_modes: int = 9,
+        cnn_scoring: str = "rescore",
+        timeout: Optional[float] = None,
+    ) -> DockingResult:
+        """Execute Gnina docking (CPU or GPU).
+        
+        Parameters
+        ----------
+        receptor : str
+            Receptor PDB path.
+        ligand : str
+            Ligand PDB/PDBQT path.
+        center : (float, float, float)
+            Box center coordinates.
+        box_size : (float, float, float)
+            Box dimensions.
+        output_dir : str
+            Output directory.
+        exhaustiveness : int
+            Search exhaustiveness (1-8).
+        num_modes : int
+            Number of output poses.
+        cnn_scoring : str
+            Scoring method: "rescore", "ranking", or "dock".
+        timeout : float, optional
+            Timeout in seconds.
+            
+        Returns
+        -------
+        DockingResult
+        """
+        self._ensure_dir(output_dir)
+        output_path = os.path.join(output_dir, "gnina_poses.sdf")
+        cmd = [
+            self.gnina_bin,
+            "--receptor", receptor,
+            "--ligand", ligand,
+            "--center_x", str(center[0]),
+            "--center_y", str(center[1]),
+            "--center_z", str(center[2]),
+            "--size_x", str(box_size[0]),
+            "--size_y", str(box_size[1]),
+            "--size_z", str(box_size[2]),
+            "--out", output_path,
+            "--exhaustiveness", str(exhaustiveness),
+            "--num_modes", str(num_modes),
+            "--cnn_scoring", cnn_scoring,
+            "--cpu", str(self.hw.gnina_threads),
+            "--device", "0",  # GPU device 0
+        ]
+        return _execute_engine(cmd, "GNINA", output_path, timeout=timeout)
+
+    def run_ledock(
+        self,
+        receptor_pdb: str,
+        ligand_mol2: str,
+        center: Tuple[float, float, float],
+        box_size: Tuple[float, float, float],
+        output_dir: str,
+        n_poses: int = 10,
+        timeout: Optional[float] = None,
+    ) -> DockingResult:
+        """Execute LeDock with relative pathing.
+        
+        Parameters
+        ----------
+        receptor_pdb : str
+            Receptor PDB path.
+        ligand_mol2 : str
+            Ligand MOL2 path.
+        center : (float, float, float)
+            Box center coordinates.
+        box_size : (float, float, float)
+            Box dimensions.
+        output_dir : str
+            Output directory.
+        n_poses : int
+            Number of output poses.
+        timeout : float, optional
+            Timeout in seconds.
+            
+        Returns
+        -------
+        DockingResult
+        """
+        self._ensure_dir(output_dir)
+
+        # 1. Preprocess receptor via lepro
+        if not os.path.exists(os.path.join(output_dir, "pro.pdb")):
+            try:
+                subprocess.run(
+                    [self.lepro_bin, receptor_pdb],
+                    cwd=output_dir,
+                    capture_output=True,
+                    check=True,
+                    timeout=300,
+                )
+            except subprocess.CalledProcessError as e:
+                logger.error(f"lepro preprocessing failed: {e.stderr}")
+                return DockingResult(
+                    engine=EngineType.LEDOCK,
+                    return_code=1,
+                    wall_time_s=0,
+                    output_path="",
+                    success=False,
+                )
+
+        # 2. Copy ligand to work directory
+        local_ligand_name = os.path.basename(ligand_mol2)
+        local_ligand_path = os.path.join(output_dir, local_ligand_name)
+        if not os.path.exists(local_ligand_path):
+            shutil.copy2(ligand_mol2, local_ligand_path)
+
+        # 3. Generate ligand list
+        list_file = os.path.join(output_dir, "ligands.list")
+        with open(list_file, "w") as f:
+            f.write(local_ligand_name + "\n")
+
+        # 4. Generate configuration
+        x_min = center[0] - box_size[0] / 2
+        x_max = center[0] + box_size[0] / 2
+        y_min = center[1] - box_size[1] / 2
+        y_max = center[1] + box_size[1] / 2
+        z_min = center[2] - box_size[2] / 2
+        z_max = center[2] + box_size[2] / 2
+
+        dock_in = os.path.join(output_dir, "dock.in")
+        with open(dock_in, "w") as f:
+            f.write(
+                f"Receptor\npro.pdb\n\nRMSD\n1.0\n\nBinding pocket\n"
+                f"{x_min:.3f} {x_max:.3f}\n{y_min:.3f} {y_max:.3f}\n"
+                f"{z_min:.3f} {z_max:.3f}\n\nNumber of binding poses\n{n_poses}\n\n"
+                f"Ligands list\nligands.list\n\nEND\n"
+            )
+
+        output_path = os.path.join(output_dir, f"{local_ligand_name.split(".")[0]}.dok")
+        return _execute_engine(
+            [self.ledock_bin, "dock.in"],
+            "LEDOCK",
+            output_path,
+            timeout=timeout,
+            cwd=output_dir,
+        )
+
+    def run_ensemble(
+        self,
+        receptor: str,
+        ligand: str,
+        center: Tuple[float, float, float],
+        box_size: Tuple[float, float, float],
+        output_dir: str,
+        exhaustiveness: int = 8,
+        num_modes: int = 9,
+        cnn_scoring: str = "rescore",
+        receptor_pdb: Optional[str] = None,
+        ligand_mol2: Optional[str] = None,
+        n_ledock_poses: int = 10,
+        timeout: Optional[float] = None,
+        engines: Optional[Sequence[EngineType]] = None,
+    ) -> List[DockingResult]:
+        """Parallel dispatch of the docking ensemble via ProcessPoolExecutor.
+        
+        Parameters
+        ----------
+        receptor : str
+            Receptor PDBQT path (for Smina/Gnina).
+        ligand : str
+            Ligand PDBQT path (for Smina/Gnina).
+        center : (float, float, float)
+            Box center coordinates.
+        box_size : (float, float, float)
+            Box dimensions.
+        output_dir : str
+            Root output directory.
+        exhaustiveness : int
+            Search exhaustiveness.
+        num_modes : int
+            Number of poses per engine.
+        cnn_scoring : str
+            Gnina CNN scoring method.
+        receptor_pdb : str, optional
+            Receptor PDB path (for LeDock).
+        ligand_mol2 : str, optional
+            Ligand MOL2 path (for LeDock).
+        n_ledock_poses : int
+            Number of poses for LeDock.
+        timeout : float, optional
+            Timeout per engine (seconds). Auto-set if None.
+        engines : Sequence[EngineType], optional
+            Engines to run. Defaults to [GNINA, SMINA].
+            
+        Returns
+        -------
+        List[DockingResult]
+            Results from each engine.
+            
+        Raises
+        ------
+        ValueError
+            If no engines complete successfully.
+        """
+        if engines is None:
+            engines = [EngineType.GNINA, EngineType.SMINA]
+            if receptor_pdb and ligand_mol2:
+                engines.append(EngineType.LEDOCK)
+
+        if timeout is None:
+            timeout = DockingConfig.DEFAULT_ENGINE_TIMEOUT
+
+        self._ensure_dir(output_dir)
+        results: List[DockingResult] = []
+        futures: Dict[Future, EngineType] = {}
+
+        logger.info("Ensemble dispatch: engines=%s, timeout=%s", [e.name for e in engines], timeout)
+
+        with ProcessPoolExecutor(max_workers=len(engines)) as pool:
+            # Submit all engines
+            for engine in engines:
+                engine_dir = os.path.join(output_dir, engine.name.lower())
+                self._ensure_dir(engine_dir)
+
+                if engine is EngineType.GNINA:
+                    future = pool.submit(
+                        self.run_gnina,
+                        receptor, ligand, center, box_size,
+                        engine_dir, exhaustiveness, num_modes, cnn_scoring, timeout,
+                    )
+                elif engine is EngineType.SMINA:
+                    args = []
+                    args.extend(['--energy_range', '10'])
+                    future = pool.submit(
+                        self.run_smina,
+                        receptor, ligand, center, box_size,
+                        engine_dir, exhaustiveness, num_modes, timeout,
+                    )
+                elif engine is EngineType.LEDOCK:
+                    future = pool.submit(
+                        self.run_ledock,
+                        receptor_pdb, ligand_mol2, center, box_size,
+                        engine_dir, n_ledock_poses, timeout,
+                    )
+
+                futures[future] = engine
+
+            # Collect results with timeout enforcement on the pool itself
+            pool_timeout = timeout * DockingConfig.POOL_TIMEOUT_FACTOR
+            try:
+                for future in as_completed(futures, timeout=pool_timeout):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        status = "✓" if result.success else "✗"
+                        logger.info(
+                            f"{status} {result.engine.name}: "
+                            f"rc={result.return_code}, time={result.wall_time_s:.1f}s"
+                        )
+                    except Exception as e:
+                        logger.error(f"Future result error: {e}", exc_info=True)
+            except TimeoutError:
+                logger.error(
+                    f"ProcessPoolExecutor timeout ({pool_timeout}s); "
+                    f"some engines may not have completed"
+                )
+                # Cancel remaining futures
+                for future in futures:
+                    future.cancel()
+
+        # Validation
+        if not results:
+            raise RuntimeError("No docking results obtained (all futures failed)")
+
+        successful = sum(1 for r in results if r.success)
+        logger.info(f"Ensemble complete: {successful}/{len(results)} successful")
+
+        return results

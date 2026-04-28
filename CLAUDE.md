@@ -304,15 +304,19 @@ Runtime paths (for context only):
   _quiet_rdkit() context manager silences RDKit's C++ stderr stream
   during _load_and_standardize and _compute_rmsd_matrix.
 - Ideal-SDF topology source: new fetch_rcsb_ideal_sdf() and
-  extract_ligand_code_from_mol2() helpers in preprocessor.py;
-  ConsensusAnalyzer accepts topology_template_path which takes
-  highest priority in master template resolution. Addresses
-  bond-perception mismatch on complex peptidomimetic ligands
-  (1HSG/MK1, 1IEP/STI) where obabel's mol2 perception conflicts
-  with engine-output perception, blocking AssignBondOrdersFromTemplate
-  for 100% of poses. Cell 5 RMSD reference rebuilt as
-  AssignBondOrdersFromTemplate(master_ref, native_mol) so crystal
-  positions are kept while topology comes from the canonical ideal SDF.
+  fetch_rcsb_entry_ligand_codes() (GraphQL lookup) helpers in
+  preprocessor.py; ConsensusAnalyzer accepts topology_template_path
+  which takes highest priority in master template resolution.
+  Addresses bond-perception mismatch on complex peptidomimetic
+  ligands (1HSG/MK1, 1IEP/STI) where obabel's mol2 perception
+  conflicts with engine-output perception, blocking
+  AssignBondOrdersFromTemplate for 100% of poses. Cell 5 RMSD
+  reference rebuilt as AssignBondOrdersFromTemplate(master_ref,
+  native_mol) so crystal positions are kept while topology comes
+  from the canonical ideal SDF. Cell 5 ligand-code resolution is
+  now GraphQL-primary with mol2-candidate fallback (see
+  extract_ligand_code_candidates_from_mol2). Master-template-source
+  log line is at WARNING level for diagnostic visibility in Colab.
 - fpocket coordinate regex: robust scientific notation pattern sourced
   from config
 
@@ -435,11 +439,27 @@ dataset/
 - > 3.0 angstroms RMSD: Poor (pipeline failed on this target)
 - NaN: Pipeline error (crash, failed docking, or clustering failure)
 
-### Current Benchmark (last recorded run)
+### Current Benchmark (last recorded run, 2026-04-28)
 
-- Success:    3-4 / 8 targets
-- Poor:       2-3 / 8 targets
-- NaN:        1 / 8 targets (root cause unknown -- investigate)
+- Success:    4/8 (1FJS 1.19 Å, 1STP 0.62 Å, 1OWE 0.23 Å, 1ETT 0.67 Å)
+- Poor:       2/8 (1HXW 4.24 Å, 1A30 7.78 Å)
+- NaN:        2/8 (1HSG, 1IEP — bond-perception mismatch; ideal-SDF
+              fix shipped in commit 9e10d35 but not yet validated)
+- Run was at POSES_PER_ENGINE=20 and EXHAUSTIVENESS=8 (faster batch
+  defaults). 1ETT recovered from Poor (4.00 → 0.67) after the ideal-SDF
+  topology change, suggesting other Poor targets may also benefit.
+
+### Known Limitation: Multi-Residue Ligands
+
+Targets where the ligand is deposited as a polymer chain (peptidic
+inhibitor) rather than a non-polymer entity cannot use the ideal-SDF
+topology path — RCSB's GraphQL endpoint returns null
+nonpolymer_entities. 1A30 is the canonical example in the current
+batch. These targets fall back to the crystal mol2 master template
+and are subject to the same bond-perception risks the ideal SDF was
+designed to mitigate. Supporting them properly requires composing the
+inhibitor from its constituent residue components — out of scope for
+v1.x.
 
 ### v1.x Release Criteria
 

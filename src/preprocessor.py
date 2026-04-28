@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from typing import Optional, Tuple
 
@@ -463,6 +464,86 @@ def fetch_rcsb_smiles(ligand_code: str) -> Optional[str]:
         return smiles
 
     logger.warning(f"No SMILES descriptor in RCSB response for ligand {ligand_code}")
+    return None
+
+
+def fetch_rcsb_ideal_sdf(
+    ligand_code: str, save_dir: str
+) -> Optional[str]:
+    """Download the RCSB chemical component dictionary's ideal SDF for a ligand.
+
+    The ideal SDF provides a canonical, RDKit-friendly 3D structure with
+    bond orders curated by RCSB. Used as a topology template when a
+    deposited mol2's bond perception conflicts with engine outputs
+    (common for charged peptidomimetic ligands).
+
+    The file is cached on disk after first download. Returns None on
+    network failure, missing-ligand 404, or filesystem error so the
+    caller can fall back to other topology sources.
+    """
+    code = ligand_code.upper()
+    save_path = os.path.join(save_dir, f"{code}_ideal.sdf")
+    if os.path.exists(save_path):
+        return save_path
+
+    url = f"https://files.rcsb.org/ligands/download/{code}_ideal.sdf"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning(f"RCSB ideal SDF fetch failed for {code}: {e}")
+        return None
+
+    if not resp.text.strip():
+        logger.warning(f"RCSB returned empty ideal SDF for {code}")
+        return None
+
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        with open(save_path, "w") as f:
+            f.write(resp.text)
+    except OSError as e:
+        logger.error(f"Could not write ideal SDF to {save_path}: {e}")
+        return None
+
+    logger.info(f"Cached ideal SDF for {code}: {save_path}")
+    return save_path
+
+
+def extract_ligand_code_from_mol2(mol2_path: str) -> Optional[str]:
+    """Extract the 1-3 character RCSB residue code from a MOL2 file.
+
+    Reads the substructure name from the first ATOM record and strips
+    trailing residue numbers (e.g., "STI301" → "STI"). Returns None if
+    no valid 1-3 alphanumeric code can be identified — which is fine,
+    callers fall back to other paths when the code is unknown.
+
+    Useful for batch validation where each PDBbind target's mol2 is the
+    only authoritative source for which RCSB chemical component it is.
+    """
+    if not os.path.exists(mol2_path):
+        return None
+
+    try:
+        with open(mol2_path) as f:
+            in_atom_section = False
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("@<TRIPOS>ATOM"):
+                    in_atom_section = True
+                    continue
+                if in_atom_section:
+                    if stripped.startswith("@<TRIPOS>"):
+                        break
+                    fields = stripped.split()
+                    if len(fields) >= 8:
+                        subst_name = fields[7]
+                        code = re.sub(r"\d+$", "", subst_name).upper()
+                        if 1 <= len(code) <= 3 and code.isalnum():
+                            return code
+    except OSError as e:
+        logger.warning(f"Could not read mol2 for residue code extraction: {e}")
+
     return None
 
 

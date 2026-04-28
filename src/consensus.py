@@ -97,10 +97,18 @@ class ConsensusAnalyzer:
         SMILES string for the ligand. Used as a fallback master template
         source when no reference structure is available.
     reference_ligand_path : str, optional
-        Path to a crystal-structure ligand file (mol2/sdf/pdb). When
-        provided and parseable, used directly as the master topology
-        template — most rigorous source for pose validation since the
-        bond orders come from the deposited experimental structure.
+        Path to a crystal-structure ligand file (mol2/sdf/pdb). Used as
+        a fallback topology source when no ideal SDF is provided. When
+        used as topology source, its bond orders come from the deposited
+        experimental structure (which can disagree with engine outputs
+        for complex ligands — see topology_template_path).
+    topology_template_path : str, optional
+        Path to an RCSB ideal-SDF file (or any SDF/mol2 with canonical
+        RDKit-friendly bond orders). When provided, takes priority as
+        the master topology template — its chemistry-only canonical
+        graph eliminates the depositor-perception-vs-engine-perception
+        mismatches that block AssignBondOrdersFromTemplate on
+        peptidomimetic ligands.
     """
 
     def __init__(
@@ -109,6 +117,7 @@ class ConsensusAnalyzer:
         rmsd_threshold: Optional[float] = None,
         ligand_smiles: Optional[str] = None,
         reference_ligand_path: Optional[str] = None,
+        topology_template_path: Optional[str] = None,
     ) -> None:
         self.work_dir = work_dir
         self.rmsd_threshold = (
@@ -119,6 +128,7 @@ class ConsensusAnalyzer:
 
         self.ligand_smiles = ligand_smiles
         self.reference_ligand_path = reference_ligand_path
+        self.topology_template_path = topology_template_path
         self.master_ref: Optional[Chem.Mol] = None
 
         self.all_poses: List[Chem.Mol] = []
@@ -354,19 +364,38 @@ class ConsensusAnalyzer:
         """Build the master topology template, trying sources in priority order.
 
         Priority:
-          1. Crystal-structure ligand at reference_ligand_path (mol2/sdf/pdb).
-             Most rigorous: bond orders come from the deposited experimental
-             structure, eliminating SMILES-vs-3D mismatch failure modes.
-          2. User-provided or RCSB-fetched SMILES via self.ligand_smiles.
-          3. Stereo-stripped retry of (2).
-          4. SMILES inferred from a successful docking output (last resort).
+          1. Ideal SDF at topology_template_path. Canonical RCSB-curated
+             chemistry; preferred because its bond perception is
+             RDKit-friendly and matches engine outputs more reliably than
+             depositor mol2 perception (especially for peptidomimetic
+             ligands with quaternary nitrogens / fused aromatics).
+          2. Crystal-structure ligand at reference_ligand_path. Falls back
+             when no ideal SDF is provided or the fetch failed (custom
+             ligand not in RCSB CCD).
+          3. User-provided or RCSB-fetched SMILES via self.ligand_smiles.
+          4. Stereo-stripped retry of (3).
+          5. SMILES inferred from a successful docking output (last resort).
 
         Raises
         ------
         ValueError
             If all sources fail to produce a parseable, non-empty Mol.
         """
-        # 1. Crystal-structure reference (preferred for validation)
+        # 1. Ideal SDF (preferred: canonical chemistry, RDKit-friendly)
+        if self.topology_template_path:
+            mol = self._try_load_reference(self.topology_template_path)
+            if mol is not None:
+                logger.info(
+                    f"Master template from ideal SDF "
+                    f"({mol.GetNumAtoms()} heavy atoms): {self.topology_template_path}"
+                )
+                return mol
+            logger.warning(
+                f"Ideal SDF unparseable: {self.topology_template_path}; "
+                "falling back to crystal reference"
+            )
+
+        # 2. Crystal-structure reference
         if self.reference_ligand_path:
             mol = self._try_load_reference(self.reference_ligand_path)
             if mol is not None:
@@ -380,7 +409,7 @@ class ConsensusAnalyzer:
                 "falling back to SMILES path"
             )
 
-        # 2-3. User/RCSB SMILES with stereo-stripped retry
+        # 3-4. User/RCSB SMILES with stereo-stripped retry
         if self.ligand_smiles:
             mol = self._try_parse_smiles_with_retry(self.ligand_smiles)
             if mol is not None:
@@ -392,7 +421,7 @@ class ConsensusAnalyzer:
                 "Provided SMILES unparseable; falling back to 3D inference"
             )
 
-        # 4. Last resort: infer from a successful docking output
+        # 5. Last resort: infer from a successful docking output
         inferred = self._infer_ligand_smiles(successful_results)
         if inferred:
             mol = self._try_parse_smiles_with_retry(inferred)
@@ -405,9 +434,9 @@ class ConsensusAnalyzer:
                 return mol
 
         raise ValueError(
-            "Could not build master template: crystal reference, SMILES, "
-            "and 3D inference all failed. Provide either a reference_ligand_path "
-            "or a valid ligand_smiles."
+            "Could not build master template: ideal SDF, crystal reference, "
+            "SMILES, and 3D inference all failed. Provide either a "
+            "topology_template_path, reference_ligand_path, or valid ligand_smiles."
         )
 
     @staticmethod

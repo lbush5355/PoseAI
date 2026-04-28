@@ -29,8 +29,9 @@ PoseAI/
                           pairwise RMSD matrix, HDBSCAN clustering,
                           confidence scoring. Master template resolved
                           via _resolve_master_template() in priority
-                          order: reference_ligand_path (mol2/sdf/pdb)
-                          > SMILES > stereo-stripped retry > 3D-inferred.
+                          order: topology_template_path (ideal SDF) >
+                          reference_ligand_path (crystal mol2/sdf/pdb) >
+                          SMILES > stereo-stripped retry > 3D-inferred.
                           calculate_native_rmsd(): standalone function,
                           strict in-place heavy-atom RMSD between predicted
                           pose and crystal structure (no alignment).
@@ -46,6 +47,10 @@ PoseAI/
                           active pocket detection method.
                           fetch_rcsb_smiles(): module-level function,
                           dynamically fetches ligand SMILES from RCSB.
+                          fetch_rcsb_ideal_sdf(): downloads the RCSB
+                          ideal SDF for a ligand code; cached on disk.
+                          extract_ligand_code_from_mol2(): infers RCSB
+                          residue code from a PDBbind-format mol2 file.
     site_finder.py     -- PocketAnalyzer: fpocket wrapper, pocket barycenter
                           parsing, docking box parameters. Currently not the
                           active pocket detection code path.
@@ -152,12 +157,14 @@ Runtime paths (for context only):
 
 5. **Consensus Clustering** (consensus.py)
    - Load poses from all successful engines
-   - Resolve master template via _resolve_master_template(): tries
-     crystal mol2/sdf/pdb at reference_ligand_path first, then
-     user/RCSB SMILES, then stereo-stripped retry, then 3D-inferred
-     SMILES as last resort
+   - Resolve master template via _resolve_master_template():
+     1. Ideal SDF at topology_template_path (canonical RCSB chemistry)
+     2. Crystal mol2/sdf/pdb at reference_ligand_path
+     3. User/RCSB SMILES, with stereo-stripped retry on failure
+     4. SMILES inferred from a successful docking output (last resort)
    - Standardize topology against the master template
-   - Compute pairwise heavy-atom RMSD matrix (O(n^2))
+   - Compute pairwise heavy-atom RMSD matrix (O(n^2)); parallelized
+     above cfg.rmsd_parallel_threshold
    - Cluster via HDBSCAN, identify multi-engine consensus clusters
    - Score confidence based on engine agreement and cluster size
 
@@ -165,11 +172,13 @@ Runtime paths (for context only):
    - Single-target run (Cell 4 of PoseAI.ipynb): call
      calculate_native_rmsd() with explicit reference_smiles to compute
      strict in-place heavy-atom RMSD against the crystal mol2.
-   - Batch validation (Cell 5 of PoseAI.ipynb): use analyzer.master_ref
-     as the reference and rdMolAlign.CalcRMS for the comparison. Both
-     master_ref and the predicted poses are derived from the same
-     crystal mol2 source via _resolve_master_template, so chemical
-     graphs are guaranteed isomorphic.
+   - Batch validation (Cell 5 of PoseAI.ipynb): build ref_mol via
+     AssignBondOrdersFromTemplate(analyzer.master_ref, native_mol).
+     This combines crystal positions (from native_mol) with the
+     master template's canonical bond perception (from ideal SDF when
+     available, else crystal mol2). Both ref_mol and the predicted
+     poses end up with isomorphic graphs, ensuring rdMolAlign.CalcRMS
+     succeeds without topology-mismatch artifacts.
    - No alignment applied in either path; comparison is in-place.
    - Grading scale:
      - < 2.0 angstroms: Success (near-native pose)
@@ -276,6 +285,30 @@ Runtime paths (for context only):
   comparison simplified to use analyzer.master_ref instead of the
   AssignBondOrdersFromTemplate(native_mol, native_mol) self-template
   trick, giving deterministic same-source comparison.
+- Engine imbalance in ensemble docking: SMINA --energy_range default
+  of 3 kcal/mol silently dropped most poses at high exhaustiveness
+  (now passes --energy_range 10 explicitly via DockingConfig.SMINA_ENERGY_RANGE);
+  LeDock .dok output was parsed by obabel -ipdb which only catches the
+  first MODEL (now split at "REMARK Cluster" markers in _load_dok and
+  each pose block is converted independently). Both fixes restore
+  genuine three-engine consensus in batch validation.
+- RMSD matrix parallelization: _compute_rmsd_matrix uses
+  multiprocessing.Pool above cfg.rmsd_parallel_threshold. New
+  rmsd_parallel_threshold and rmsd_n_workers fields on ConsensusConfig.
+- Log noise reduction: aggregated per-pose bond-order failures into a
+  single summary WARNING with engine breakdown counts; new
+  _quiet_rdkit() context manager silences RDKit's C++ stderr stream
+  during _load_and_standardize and _compute_rmsd_matrix.
+- Ideal-SDF topology source: new fetch_rcsb_ideal_sdf() and
+  extract_ligand_code_from_mol2() helpers in preprocessor.py;
+  ConsensusAnalyzer accepts topology_template_path which takes
+  highest priority in master template resolution. Addresses
+  bond-perception mismatch on complex peptidomimetic ligands
+  (1HSG/MK1, 1IEP/STI) where obabel's mol2 perception conflicts
+  with engine-output perception, blocking AssignBondOrdersFromTemplate
+  for 100% of poses. Cell 5 RMSD reference rebuilt as
+  AssignBondOrdersFromTemplate(master_ref, native_mol) so crystal
+  positions are kept while topology comes from the canonical ideal SDF.
 - fpocket coordinate regex: robust scientific notation pattern sourced
   from config
 

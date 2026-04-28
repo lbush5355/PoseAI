@@ -220,21 +220,24 @@ class ProteinLigandPrep:
         Parameters
         ----------
         ligand_code : str
-            Three-letter residue code of the co-crystallised ligand
-            (e.g., "ATP", "STI").
+            RCSB residue code of the co-crystallised ligand. Per the
+            PDB chemical component dictionary, codes are 1-3
+            alphanumeric characters (e.g., "STI", "N3", "ZN").
 
         Returns
         -------
         bool
             True if both output files were written.
-            
+
         Raises
         ------
         ValueError
-            If ligand code is not exactly 3 characters.
+            If ligand code is not 1-3 alphanumeric characters.
         """
-        if len(ligand_code) != 3:
-            raise ValueError(f"Ligand code must be 3 characters, got: {ligand_code}")
+        if not (1 <= len(ligand_code) <= 3) or not ligand_code.isalnum():
+            raise ValueError(
+                f"Ligand code must be 1-3 alphanumeric characters, got: {ligand_code!r}"
+            )
 
         if not os.path.exists(self.raw_pdb):
             logger.error(f"Raw PDB not found: {self.raw_pdb}")

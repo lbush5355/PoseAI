@@ -91,20 +91,23 @@ hardware (NVIDIA A100 GPU, high vCPU count) unavailable on a local
 machine. Docking engine binaries are Linux x86_64 ELF files and cannot
 run on macOS or Windows.
 
-Development workflow is in transition:
-- Previously: active development in Colab with Gemini, pushing stable
-  milestones to GitHub
-- Going forward: potentially shifting to local development with Claude
-  Code, pushing to GitHub, pulling into Colab for execution and testing
-
-All execution and validation must happen in Colab regardless of where
-code is edited. Code is not considered stable until it passes batch
-validation in the Colab runtime.
+Development workflow:
+- Active development is local with Claude Code, committed to GitHub.
+- Stage 1 of PoseAI.ipynb clones lbush5355/PoseAI fresh into
+  /tmp/poseai_repo on every Colab session and copies src/*.py into
+  /content/fast_lane/src. GitHub is the single source of truth — Drive's
+  src/ is no longer used.
+- All execution and validation must happen in Colab regardless of where
+  code is edited. Code is not considered stable until it passes batch
+  validation in the Colab runtime.
 
 Runtime paths (for context only):
-- /content/drive/MyDrive/PoseAI/src/ -- canonical source on Drive
+- /tmp/poseai_repo/                  -- fresh git clone, source of src/ modules
+- /content/fast_lane/src/            -- working copy of src/ modules (synced from clone)
 - /content/fast_lane/                -- ephemeral high-speed scratch disk
 - /content/fast_lane/bin/            -- docking engine binaries
+- /content/drive/MyDrive/PoseAI/     -- Drive root, used for dataset/, results/,
+                                        batch_results/ persistence (not src/)
 
 ---
 

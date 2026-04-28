@@ -43,5 +43,4 @@ try:
         "visualizer",
     ]
 except ImportError:
-    # Handle case where submodules aren't available yet
     __all__ = []

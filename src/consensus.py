@@ -21,32 +21,10 @@ import hdbscan
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign, AllChem
 
+from config import get_config
 from docking import DockingResult, EngineType
 
 logger = logging.getLogger("poseai.consensus")
-
-
-# ─────────────────────────────────────────────────────────────────
-# Configuration Constants
-# ─────────────────────────────────────────────────────────────────
-class ConsensusConfig:
-    """Configuration parameters for consensus analysis."""
-    
-    # RMSD clustering threshold (angstroms)
-    DEFAULT_RMSD_THRESHOLD = 2.0
-    
-    # Confidence score weighting
-    CONFIDENCE_WEIGHTS = {
-        "consensus_factor": 0.7,      # Multi-engine agreement
-        "cluster_size_factor": 0.3,   # Population size
-    }
-    
-    # HDBSCAN parameters
-    MIN_CLUSTER_SIZE = 2
-    HDBSCAN_METRIC = "precomputed"
-    
-    # Cluster size normalization (poses)
-    IDEAL_CLUSTER_SIZE = 10
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -73,11 +51,15 @@ class ConsensusAnalyzer:
     def __init__(
         self,
         work_dir: str = "/content/fast_lane",
-        rmsd_threshold: float = ConsensusConfig.DEFAULT_RMSD_THRESHOLD,
+        rmsd_threshold: Optional[float] = None,
         ligand_smiles: Optional[str] = None,
     ) -> None:
         self.work_dir = work_dir
-        self.rmsd_threshold = rmsd_threshold
+        self.rmsd_threshold = (
+            rmsd_threshold
+            if rmsd_threshold is not None
+            else get_config().consensus.rmsd_threshold
+        )
         
         # SMILES will be set in analyze_ensemble() after ligand extraction
         # This allows auto-detection from actual ligand structure
@@ -343,7 +325,7 @@ class ConsensusAnalyzer:
         self, successful_results: List[DockingResult]
     ) -> Tuple[List[Chem.Mol], List[Dict]]:
         """Load and standardize topologies across engines.
-        
+
         Returns
         -------
         Tuple[List[Chem.Mol], List[Dict]]
@@ -351,155 +333,61 @@ class ConsensusAnalyzer:
         """
         processed_poses = []
         metadata = []
-        
+
         for dr in successful_results:
             mols = self._load_molecule(dr.output_path, dr.engine)
-            
+
             for idx, mol in enumerate(mols):
                 try:
-                    # Template-based bond assignment ensures identical topology
-                    try:
-                        try:
-                            try:
-                                try:
-                                    std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref, mol)
-                                except Exception:
-                                    try:
-                                        mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-                                        self.master_ref_no_h = Chem.RemoveHs(self.master_ref)
-                                        std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h, mol_no_h)
-                                    except:
-                                        std_mol = mol
-                            except Exception:
-                                try:
-                                    mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-                                    self.master_ref_no_h = Chem.RemoveHs(self.master_ref)
-                                    try:
-                                        std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h, mol_no_h)
-                                    except Exception:
-                                        try:
-                                            mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                            self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except:
-                                            std_mol = mol_no_h
-                                except:
-                                    std_mol = mol
-                        except Exception:
-                            try:
-                                mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-                                self.master_ref_no_h = Chem.RemoveHs(self.master_ref)
-                                try:
-                                    try:
-                                        std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h, mol_no_h)
-                                    except Exception:
-                                        try:
-                                            mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                            self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except:
-                                            std_mol = mol_no_h
-                                except Exception:
-                                    try:
-                                        mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                        self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                        try:
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except Exception:
-                                            try:
-                                                mol_no_h_no_h_no_h = Chem.RemoveHs(mol_no_h_no_h, sanitize=False)
-                                                self.master_ref_no_h_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h_no_h)
-                                                std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h_no_h, mol_no_h_no_h_no_h)
-                                            except:
-                                                std_mol = mol_no_h_no_h
-                                    except:
-                                        std_mol = mol_no_h
-                            except:
-                                std_mol = mol
-                    except Exception:
-                        try:
-                            mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-                            self.master_ref_no_h = Chem.RemoveHs(self.master_ref)
-                            try:
-                                try:
-                                    try:
-                                        std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h, mol_no_h)
-                                    except Exception:
-                                        try:
-                                            mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                            self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except:
-                                            std_mol = mol_no_h
-                                except Exception:
-                                    try:
-                                        mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                        self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                        try:
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except Exception:
-                                            try:
-                                                mol_no_h_no_h_no_h = Chem.RemoveHs(mol_no_h_no_h, sanitize=False)
-                                                self.master_ref_no_h_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h_no_h)
-                                                std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h_no_h, mol_no_h_no_h_no_h)
-                                            except:
-                                                std_mol = mol_no_h_no_h
-                                    except:
-                                        std_mol = mol_no_h
-                            except Exception:
-                                try:
-                                    mol_no_h_no_h = Chem.RemoveHs(mol_no_h, sanitize=False)
-                                    self.master_ref_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h)
-                                    try:
-                                        try:
-                                            std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h, mol_no_h_no_h)
-                                        except Exception:
-                                            try:
-                                                mol_no_h_no_h_no_h = Chem.RemoveHs(mol_no_h_no_h, sanitize=False)
-                                                self.master_ref_no_h_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h_no_h)
-                                                std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h_no_h, mol_no_h_no_h_no_h)
-                                            except:
-                                                std_mol = mol_no_h_no_h
-                                    except Exception:
-                                        try:
-                                            mol_no_h_no_h_no_h = Chem.RemoveHs(mol_no_h_no_h, sanitize=False)
-                                            self.master_ref_no_h_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h_no_h)
-                                            try:
-                                                std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h_no_h, mol_no_h_no_h_no_h)
-                                            except Exception:
-                                                try:
-                                                    mol_no_h_no_h_no_h_no_h = Chem.RemoveHs(mol_no_h_no_h_no_h, sanitize=False)
-                                                    self.master_ref_no_h_no_h_no_h_no_h = Chem.RemoveHs(self.master_ref_no_h_no_h_no_h)
-                                                    std_mol = AllChem.AssignBondOrdersFromTemplate(self.master_ref_no_h_no_h_no_h_no_h, mol_no_h_no_h_no_h_no_h)
-                                                except:
-                                                    std_mol = mol_no_h_no_h_no_h
-                                        except:
-                                            std_mol = mol_no_h_no_h
-                                except:
-                                    std_mol = mol_no_h
-                        except:
-                            std_mol = mol
+                    std_mol = self._assign_bond_orders(mol, dr.engine.name, idx)
                     processed_poses.append(std_mol)
                     metadata.append({
                         "engine": dr.engine.name,
                         "pose_index": idx,
                         "output_file": dr.output_path,
                     })
-                except ValueError as e:
-                    # Bond assignment failure — incompatible topology
-                    logger.warning(
-                        f"Topology mismatch for {dr.engine.name} pose {idx}: {e}"
-                    )
-                    continue
                 except Exception as e:
                     logger.error(
                         f"Unexpected error standardizing {dr.engine.name} pose {idx}: {e}",
                         exc_info=True,
                     )
                     continue
-        
+
         logger.info(f"Standardized {len(processed_poses)} poses from {len(successful_results)} engines")
         return processed_poses, metadata
+
+    def _assign_bond_orders(
+        self, mol: Chem.Mol, engine_name: str, pose_idx: int
+    ) -> Chem.Mol:
+        """Assign bond orders from master template, with heavy-atom fallback.
+
+        Stage 1 attempts direct template assignment. Stage 2 strips hydrogens
+        from both the mol and template before retrying — this handles the
+        common case where the engine output has implicit Hs that confuse
+        the bond perception in AssignBondOrdersFromTemplate.
+
+        If both stages fail, the input mol is returned with its original
+        topology and a warning is logged. The pose is still kept rather
+        than dropped to preserve the existing pipeline behavior.
+        """
+        try:
+            return AllChem.AssignBondOrdersFromTemplate(self.master_ref, mol)
+        except (ValueError, RuntimeError) as e:
+            logger.debug(
+                f"Direct bond order assignment failed for {engine_name} pose {pose_idx}: {e}"
+            )
+
+        try:
+            mol_heavy = Chem.RemoveHs(mol, sanitize=False)
+            ref_heavy = Chem.RemoveHs(self.master_ref)
+            return AllChem.AssignBondOrdersFromTemplate(ref_heavy, mol_heavy)
+        except (ValueError, RuntimeError) as e:
+            logger.warning(
+                f"Heavy-atom bond order assignment failed for {engine_name} "
+                f"pose {pose_idx}: {e}; using input topology as-is"
+            )
+
+        return mol
 
     @staticmethod
     def _compute_rmsd_matrix(mols: List[Chem.Mol]) -> np.ndarray:
@@ -512,7 +400,8 @@ class ConsensusAnalyzer:
         for m in mols:
             try:
                 heavy_mols.append(Chem.RemoveHs(m))
-            except:
+            except (ValueError, RuntimeError) as e:
+                logger.debug(f"Could not strip hydrogens for RMSD matrix entry: {e}")
                 heavy_mols.append(None)
 
         for i in range(n):
@@ -557,9 +446,10 @@ class ConsensusAnalyzer:
         np.ndarray
             Cluster labels (-1 for noise).
         """
+        cfg = get_config().consensus
         clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=ConsensusConfig.MIN_CLUSTER_SIZE,
-            metric=ConsensusConfig.HDBSCAN_METRIC,
+            min_cluster_size=cfg.min_cluster_size,
+            metric=cfg.hdbscan_metric,
             cluster_selection_epsilon=self.rmsd_threshold,
             allow_single_cluster=False,
         )
@@ -649,17 +539,18 @@ class ConsensusAnalyzer:
         num_engines_in_cluster = best["Num_Engines"]
         cluster_size = best["Size"]
         
+        cfg = get_config().consensus
+
         # Consensus factor: capped at 3 engines (diminishing returns beyond)
         consensus_factor = min(1.0, num_engines_in_cluster / 3.0)
-        
-        # Size factor: normalized to 10 poses (diminishing returns)
-        size_factor = min(1.0, cluster_size / ConsensusConfig.IDEAL_CLUSTER_SIZE)
-        
+
+        # Size factor: normalized to ideal cluster size (diminishing returns)
+        size_factor = min(1.0, cluster_size / cfg.ideal_cluster_size)
+
         # Weighted combination
-        weights = ConsensusConfig.CONFIDENCE_WEIGHTS
         score = (
-            consensus_factor * weights["consensus_factor"] +
-            size_factor * weights["cluster_size_factor"]
+            consensus_factor * cfg.consensus_weight +
+            size_factor * cfg.cluster_size_weight
         )
         
         return round(float(score), 2)
@@ -668,14 +559,8 @@ class ConsensusAnalyzer:
     # Cleanup
     # ─────────────────────────────────────────────────────────────
     def __del__(self) -> None:
-        """Clean up RDKit molecules on garbage collection."""
+        """Clear pose references to release RDKit C++ objects."""
         if hasattr(self, "all_poses"):
-            # Explicitly clear RDKit Mol objects to free C++ memory
-            for mol in self.all_poses:
-                try:
-                    del mol
-                except:
-                    pass
             self.all_poses.clear()
 
 

@@ -26,24 +26,13 @@ import os
 import subprocess
 from typing import Optional, Tuple
 
+import numpy as np
+import requests
 from rdkit import Chem
 
+from config import get_config
+
 logger = logging.getLogger("poseai.preprocessor")
-
-
-# ─────────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────────
-class PreprocessorConfig:
-    """Configuration for structure preparation."""
-    
-    # Ligand validation
-    MIN_LIGAND_ATOMS = 5          # Too small = likely artifact
-    MAX_LIGAND_ATOMS = 1000       # Too large = likely protein/complex
-    
-    # RCSB API
-    RCSB_DOWNLOAD_URL = "https://files.rcsb.org/download"
-    RCSB_TIMEOUT_S = 30
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -122,17 +111,18 @@ class ProteinLigandPrep:
             logger.info(f"PDB file already present: {self.raw_pdb}")
             return True
 
-        url = f"{PreprocessorConfig.RCSB_DOWNLOAD_URL}/{self.pdb_id.upper()}.pdb"
+        cfg = get_config().preprocessor
+        url = f"{cfg.rcsb_download_url}/{self.pdb_id.upper()}.pdb"
         logger.info(f"Downloading {self.pdb_id.upper()} from RCSB...")
 
         try:
             result = subprocess.run(
-                ["wget", "-q", "--timeout", str(PreprocessorConfig.RCSB_TIMEOUT_S), 
+                ["wget", "-q", "--timeout", str(int(cfg.rcsb_timeout_s)),
                  url, "-O", self.raw_pdb],
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=PreprocessorConfig.RCSB_TIMEOUT_S + 5,
+                timeout=cfg.rcsb_timeout_s + 5,
             )
             logger.info(f"Download complete: {self.raw_pdb}")
             return True
@@ -172,6 +162,7 @@ class ProteinLigandPrep:
         try:
             # --- PDBQT for Smina / Gnina ---
             logger.info("Converting receptor to PDBQT format...")
+            obabel_timeout = get_config().preprocessor.obabel_timeout_s
             cmd_pdbqt = [
                 "obabel", self.raw_pdb, "-O", self.receptor_pdbqt,
                 "-xr",                          # Remove water
@@ -179,7 +170,8 @@ class ProteinLigandPrep:
                 "--partialcharge", "gasteiger",  # Gasteiger charges
             ]
             result = subprocess.run(
-                cmd_pdbqt, check=True, capture_output=True, text=True, timeout=60
+                cmd_pdbqt, check=True, capture_output=True, text=True,
+                timeout=obabel_timeout,
             )
             
             if not os.path.exists(self.receptor_pdbqt):
@@ -195,7 +187,8 @@ class ProteinLigandPrep:
                 "-xr", "-d",  # Remove water, add H
             ]
             result = subprocess.run(
-                cmd_pdb, check=True, capture_output=True, text=True, timeout=60
+                cmd_pdb, check=True, capture_output=True, text=True,
+                timeout=obabel_timeout,
             )
             
             if not os.path.exists(self.receptor_pdb):
@@ -288,12 +281,14 @@ class ProteinLigandPrep:
             logger.info(f"Extracted {len(hetatm_serials)} HETATM atoms for {ligand_code}")
 
             # --- PDBQT for Smina / Gnina ---
+            obabel_timeout = get_config().preprocessor.obabel_timeout_s
             logger.info("Converting ligand to PDBQT format...")
             cmd_pdbqt = [
                 "obabel", temp_pdb, "-O", self.ligand_pdbqt,
                 "-d", "--partialcharge", "gasteiger",
             ]
-            subprocess.run(cmd_pdbqt, check=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(cmd_pdbqt, check=True, capture_output=True, text=True,
+                           timeout=obabel_timeout)
 
             # Sanitize PDBQT
             self._sanitise_pdbqt(self.ligand_pdbqt)
@@ -309,7 +304,8 @@ class ProteinLigandPrep:
                 "obabel", temp_pdb, "-O", self.ligand_mol2,
                 "-d", "--partialcharge", "gasteiger",
             ]
-            subprocess.run(cmd_mol2, check=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(cmd_mol2, check=True, capture_output=True, text=True,
+                           timeout=obabel_timeout)
             logger.info(f"Ligand MOL2 written: {self.ligand_mol2}")
 
             # Validate MOL2 (non-blocking warning)
@@ -385,8 +381,9 @@ class ProteinLigandPrep:
             with open(pdbqt_path, "r") as f:
                 lines = f.readlines()
             
+            min_atoms = get_config().preprocessor.min_ligand_atoms
             atom_lines = [l for l in lines if l.startswith(("ATOM", "HETATM"))]
-            if len(atom_lines) < 5:
+            if len(atom_lines) < min_atoms:
                 logger.warning(f"PDBQT has very few atoms: {len(atom_lines)}")
                 return False
             
@@ -427,33 +424,72 @@ class ProteinLigandPrep:
             logger.warning(f"MOL2 validation error: {e}")
             return False
 
-# --- Dynamically added methods ---
-import requests
-import numpy as np
-from rdkit import Chem
+def fetch_rcsb_smiles(ligand_code: str) -> Optional[str]:
+    """Fetch canonical SMILES for a ligand from the RCSB chemcomp API.
 
-def fetch_rcsb_smiles(ligand_code):
+    Returns the stereochemistry-aware SMILES when available, otherwise
+    the plain SMILES. Returns None if the ligand is not found, the
+    response is malformed, or no SMILES descriptor is present. Network
+    and parse errors are logged at WARNING and converted to None so
+    callers can fall back to a user-supplied SMILES.
+    """
+    url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{ligand_code.upper()}"
+
     try:
-        url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{ligand_code.upper()}"
         resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            descriptors = data.get("rcsb_chem_comp_descriptor", [])
-            if isinstance(descriptors, dict): descriptors = [descriptors]
-            for desc in descriptors:
-                if isinstance(desc, dict):
-                    if "smilesstereo" in desc: return desc.get("smilesstereo")
-                    elif "smiles" in desc: return desc.get("smiles")
-    except Exception: pass
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.warning(f"RCSB fetch failed for ligand {ligand_code}: {e}")
+        return None
+    except ValueError as e:
+        logger.warning(f"Invalid JSON from RCSB for ligand {ligand_code}: {e}")
+        return None
+
+    descriptors = data.get("rcsb_chem_comp_descriptor", [])
+    if isinstance(descriptors, dict):
+        descriptors = [descriptors]
+
+    for desc in descriptors:
+        if not isinstance(desc, dict):
+            continue
+        if "smilesstereo" in desc:
+            return desc["smilesstereo"]
+        if "smiles" in desc:
+            return desc["smiles"]
+
+    logger.warning(f"No SMILES descriptor in RCSB response for ligand {ligand_code}")
     return None
 
-def get_ligand_centroid(mol2_path, padding=10.0):
-    try:
-        mol = Chem.MolFromMol2File(mol2_path, sanitize=False)
-        if mol and mol.GetNumConformers() > 0:
-            coords = mol.GetConformer().GetPositions()
-            center = tuple(np.mean(coords, axis=0))
-            size = tuple(np.max(coords, axis=0) - np.min(coords, axis=0) + float(padding))
-            return center, size
-    except Exception: pass
-    return (0.0, 0.0, 0.0), (20.0, 20.0, 20.0)
+
+def get_ligand_centroid(
+    mol2_path: str, padding: float = 10.0
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Compute docking box center and size from a reference ligand MOL2.
+
+    The center is the centroid of all atom coordinates; the size is the
+    axis-aligned bounding box of those coordinates plus ``padding`` on
+    each axis.
+
+    Raises
+    ------
+    ValueError
+        If the file is missing, RDKit cannot parse it, or it contains
+        no 3D conformer. Raising rather than returning a fallback box
+        prevents silently docking against a wrong region of space.
+    """
+    if not os.path.exists(mol2_path):
+        raise ValueError(f"Reference ligand MOL2 not found: {mol2_path}")
+
+    mol = Chem.MolFromMol2File(mol2_path, sanitize=False)
+    if mol is None:
+        raise ValueError(f"RDKit could not parse MOL2 file: {mol2_path}")
+    if mol.GetNumConformers() == 0:
+        raise ValueError(f"MOL2 file has no 3D conformer: {mol2_path}")
+
+    coords = mol.GetConformer().GetPositions()
+    center = tuple(float(c) for c in np.mean(coords, axis=0))
+    size = tuple(
+        float(s) for s in np.max(coords, axis=0) - np.min(coords, axis=0) + float(padding)
+    )
+    return center, size

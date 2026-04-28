@@ -1,0 +1,21 @@
+@<tripos>MOLECULE
+1iep_ligand
+ 5 4 0 0 0
+SMALL
+NO_CHARGES
+
+@<tripos>ATOM
+     1 C1         11.0000   10.0000   10.0000 C.ar      1  LIG      0.0000
+     2 C2         12.0000   10.0000   10.0000 C.ar      1  LIG      0.0000
+     3 C3         12.5000   11.0000   10.0000 C.ar      1  LIG      0.0000
+     4 C4         12.0000   12.0000   10.0000 C.ar      1  LIG      0.0000
+     5 C5         11.0000   12.0000   10.0000 C.ar      1  LIG      0.0000
+
+@<tripos>BOND
+     1     1     2    ar
+     2     2     3    ar
+     3     3     4    ar
+     4     4     5    ar
+
+@<tripos>SUBSTRUCTURE
+     1 LIG         1 TEMP              0 ****  ****    0 ROOT

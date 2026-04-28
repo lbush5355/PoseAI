@@ -449,17 +449,18 @@ def fetch_rcsb_smiles(ligand_code: str) -> Optional[str]:
         logger.warning(f"Invalid JSON from RCSB for ligand {ligand_code}: {e}")
         return None
 
-    descriptors = data.get("rcsb_chem_comp_descriptor", [])
-    if isinstance(descriptors, dict):
-        descriptors = [descriptors]
+    descriptor = data.get("rcsb_chem_comp_descriptor")
+    if not isinstance(descriptor, dict):
+        logger.warning(
+            f"Unexpected RCSB descriptor shape for ligand {ligand_code}: "
+            f"{type(descriptor).__name__}"
+        )
+        return None
 
-    for desc in descriptors:
-        if not isinstance(desc, dict):
-            continue
-        if "smilesstereo" in desc:
-            return desc["smilesstereo"]
-        if "smiles" in desc:
-            return desc["smiles"]
+    # Prefer stereo-aware SMILES; fall back to plain SMILES
+    smiles = descriptor.get("SMILES_stereo") or descriptor.get("SMILES")
+    if smiles:
+        return smiles
 
     logger.warning(f"No SMILES descriptor in RCSB response for ligand {ligand_code}")
     return None

@@ -147,7 +147,11 @@ Runtime paths (for context only):
 
 5. **Consensus Clustering** (consensus.py)
    - Load poses from all successful engines
-   - Standardize topology via SMILES master template
+   - Resolve master template via _resolve_master_template(): tries
+     crystal mol2/sdf/pdb at reference_ligand_path first, then
+     user/RCSB SMILES, then stereo-stripped retry, then 3D-inferred
+     SMILES as last resort
+   - Standardize topology against the master template
    - Compute pairwise heavy-atom RMSD matrix (O(n^2))
    - Cluster via HDBSCAN, identify multi-engine consensus clusters
    - Score confidence based on engine agreement and cluster size
@@ -244,6 +248,23 @@ Runtime paths (for context only):
   parse failure instead of silently returning a (0,0,0) box -- the
   prior fallback could mask docking-against-wrong-region failures as
   Poor RMSD results in batch validation.
+- Hardcoded len == 3 ligand-code check in isolate_ligand: relaxed to
+  accept 1-3 alphanumeric characters per the PDB chemical component
+  dictionary spec (unblocks N3, ZN, MG, CA, etc.).
+- fetch_rcsb_smiles() field name bug: RCSB chemcomp API returns a
+  dict (not list) with uppercase keys SMILES_stereo and SMILES; code
+  was looking for lowercase smilesstereo and smiles, so the fetch
+  always returned None even for well-known ligands like STI.
+- SMILES robustness redesign in ConsensusAnalyzer: added
+  reference_ligand_path constructor param. New _resolve_master_template
+  tries crystal mol2/sdf/pdb first, then SMILES (with stereo-stripped
+  retry), then 3D inference as last resort. Eliminates the
+  SMILES-vs-3D-mismatch class of RDKit failures (tautomers, aromaticity
+  perception, charge states) for pose-validation runs by using the
+  deposited experimental structure directly. Notebook Cell 5 RMSD
+  comparison simplified to use analyzer.master_ref instead of the
+  AssignBondOrdersFromTemplate(native_mol, native_mol) self-template
+  trick, giving deterministic same-source comparison.
 - fpocket coordinate regex: robust scientific notation pattern sourced
   from config
 

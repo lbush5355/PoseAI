@@ -44,15 +44,21 @@ class ConsensusAnalyzer:
     rmsd_threshold : float
         RMSD clustering threshold in angstroms.
     ligand_smiles : str, optional
-        SMILES string for the ligand. If None, inferred from extracted structure.
-        Providing custom SMILES overrides auto-detection.
+        SMILES string for the ligand. Used as a fallback master template
+        source when no reference structure is available.
+    reference_ligand_path : str, optional
+        Path to a crystal-structure ligand file (mol2/sdf/pdb). When
+        provided and parseable, used directly as the master topology
+        template — most rigorous source for pose validation since the
+        bond orders come from the deposited experimental structure.
     """
-    
+
     def __init__(
         self,
         work_dir: str = "/content/fast_lane",
         rmsd_threshold: Optional[float] = None,
         ligand_smiles: Optional[str] = None,
+        reference_ligand_path: Optional[str] = None,
     ) -> None:
         self.work_dir = work_dir
         self.rmsd_threshold = (
@@ -60,12 +66,11 @@ class ConsensusAnalyzer:
             if rmsd_threshold is not None
             else get_config().consensus.rmsd_threshold
         )
-        
-        # SMILES will be set in analyze_ensemble() after ligand extraction
-        # This allows auto-detection from actual ligand structure
+
         self.ligand_smiles = ligand_smiles
+        self.reference_ligand_path = reference_ligand_path
         self.master_ref: Optional[Chem.Mol] = None
-        
+
         self.all_poses: List[Chem.Mol] = []
         self.cluster_labels: np.ndarray = np.array([])
         self._metadata: List[Dict] = []
@@ -236,6 +241,135 @@ class ConsensusAnalyzer:
             return []
 
     # ─────────────────────────────────────────────────────────────
+    # Master Template Resolution
+    # ─────────────────────────────────────────────────────────────
+    def _resolve_master_template(
+        self, successful_results: List[DockingResult]
+    ) -> Chem.Mol:
+        """Build the master topology template, trying sources in priority order.
+
+        Priority:
+          1. Crystal-structure ligand at reference_ligand_path (mol2/sdf/pdb).
+             Most rigorous: bond orders come from the deposited experimental
+             structure, eliminating SMILES-vs-3D mismatch failure modes.
+          2. User-provided or RCSB-fetched SMILES via self.ligand_smiles.
+          3. Stereo-stripped retry of (2).
+          4. SMILES inferred from a successful docking output (last resort).
+
+        Raises
+        ------
+        ValueError
+            If all sources fail to produce a parseable, non-empty Mol.
+        """
+        # 1. Crystal-structure reference (preferred for validation)
+        if self.reference_ligand_path:
+            mol = self._try_load_reference(self.reference_ligand_path)
+            if mol is not None:
+                logger.info(
+                    f"Master template from crystal reference "
+                    f"({mol.GetNumAtoms()} heavy atoms): {self.reference_ligand_path}"
+                )
+                return mol
+            logger.warning(
+                f"Crystal reference unparseable: {self.reference_ligand_path}; "
+                "falling back to SMILES path"
+            )
+
+        # 2-3. User/RCSB SMILES with stereo-stripped retry
+        if self.ligand_smiles:
+            mol = self._try_parse_smiles_with_retry(self.ligand_smiles)
+            if mol is not None:
+                logger.info(
+                    f"Master template from SMILES ({mol.GetNumAtoms()} heavy atoms)"
+                )
+                return mol
+            logger.warning(
+                "Provided SMILES unparseable; falling back to 3D inference"
+            )
+
+        # 4. Last resort: infer from a successful docking output
+        inferred = self._infer_ligand_smiles(successful_results)
+        if inferred:
+            mol = self._try_parse_smiles_with_retry(inferred)
+            if mol is not None:
+                self.ligand_smiles = inferred
+                logger.info(
+                    f"Master template inferred from docking output "
+                    f"({mol.GetNumAtoms()} heavy atoms)"
+                )
+                return mol
+
+        raise ValueError(
+            "Could not build master template: crystal reference, SMILES, "
+            "and 3D inference all failed. Provide either a reference_ligand_path "
+            "or a valid ligand_smiles."
+        )
+
+    @staticmethod
+    def _try_load_reference(path: str) -> Optional[Chem.Mol]:
+        """Load mol2/sdf/pdb reference; return heavy-atom Mol or None on failure.
+
+        Uses sanitize=False to match the project's existing convention for
+        parsing engine/depositor outputs (see _load_sdf), then attempts a
+        non-strict SanitizeMol that tolerates depositor-specific perception
+        quirks.
+        """
+        if not os.path.exists(path):
+            return None
+
+        suffix = os.path.splitext(path)[1].lower()
+        try:
+            if suffix == ".mol2":
+                mol = Chem.MolFromMol2File(path, removeHs=True, sanitize=False)
+            elif suffix == ".sdf":
+                supplier = Chem.SDMolSupplier(path, removeHs=True, sanitize=False)
+                mol = next((m for m in supplier if m is not None), None)
+            elif suffix in (".pdb", ".pdbqt"):
+                mol = Chem.MolFromPDBFile(path, removeHs=True, sanitize=False)
+            else:
+                logger.debug(f"Unsupported reference suffix {suffix} for {path}")
+                return None
+        except (ValueError, RuntimeError, OSError) as e:
+            logger.debug(f"Reference load failed for {path}: {e}")
+            return None
+
+        if mol is None or mol.GetNumAtoms() == 0:
+            return None
+
+        try:
+            Chem.SanitizeMol(mol)
+        except (ValueError, RuntimeError) as e:
+            logger.debug(
+                f"Reference {path} failed strict sanitize ({e}); using as-loaded"
+            )
+
+        return mol
+
+    @staticmethod
+    def _try_parse_smiles_with_retry(smiles: str) -> Optional[Chem.Mol]:
+        """Parse SMILES; retry with stereo descriptors stripped on failure.
+
+        Stereo descriptors (@, /, \\) are common sources of SMILES parse
+        failures when they don't match the actual 3D structure. Stripping
+        them produces a stereo-blind topology suitable for heavy-atom
+        clustering and RMSD.
+        """
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None and mol.GetNumAtoms() > 0:
+            return Chem.RemoveHs(mol)
+
+        stripped = smiles.translate(str.maketrans("", "", "@/\\"))
+        if stripped != smiles:
+            mol = Chem.MolFromSmiles(stripped)
+            if mol is not None and mol.GetNumAtoms() > 0:
+                logger.warning(
+                    "SMILES parsed only after stripping stereo descriptors"
+                )
+                return Chem.RemoveHs(mol)
+
+        return None
+
+    # ─────────────────────────────────────────────────────────────
     # Consensus Analysis Pipeline
     # ─────────────────────────────────────────────────────────────
     def analyze_ensemble(self, docking_results: List[DockingResult]) -> pd.DataFrame:
@@ -274,28 +408,10 @@ class ConsensusAnalyzer:
         logger.info(
             f"Processing {len(successful)} successful / {len(docking_results)} total runs"
         )
-        
-        # AUTO-DETECT SMILES if not provided by user
-        if self.ligand_smiles is None:
-            logger.info("Auto-detecting ligand SMILES from docking outputs...")
-            self.ligand_smiles = self._infer_ligand_smiles(successful)
-            
-            if self.ligand_smiles is None:
-                raise ValueError(
-                    "Could not infer ligand SMILES from docking outputs. "
-                    "Provide explicit LIGAND_SMILES parameter."
-                )
-        else:
-            logger.info(f"Using user-provided SMILES: {self.ligand_smiles[:50]}...")
-        
-        # Validate and create master reference
-        self._validate_smiles(self.ligand_smiles)
-        self.master_ref = Chem.RemoveHs(Chem.MolFromSmiles(self.ligand_smiles))
-        
-        if self.master_ref is None:
-            raise ValueError(f"Failed to parse ligand SMILES: {self.ligand_smiles}")
-        
-        logger.info(f"Master template: {self.master_ref.GetNumAtoms()} atoms")
+
+        # Build master template from the most rigorous available source
+        # (crystal mol2 → SMILES → stereo-stripped → 3D inference)
+        self.master_ref = self._resolve_master_template(successful)
         
         # Load and standardize topologies
         processed_poses, metadata = self._load_and_standardize(successful)

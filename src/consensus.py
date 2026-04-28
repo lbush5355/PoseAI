@@ -9,8 +9,11 @@ v2.0 — Refactored for robustness, flexibility, and error handling.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import multiprocessing
 import os
+import re
 import subprocess
 import io
 from typing import Dict, List, Optional, Tuple
@@ -18,13 +21,60 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 import hdbscan
-from rdkit import Chem
+from rdkit import Chem, RDLogger
 from rdkit.Chem import rdMolAlign, AllChem
 
 from config import get_config
 from docking import DockingResult, EngineType
 
 logger = logging.getLogger("poseai.consensus")
+
+
+@contextlib.contextmanager
+def _quiet_rdkit():
+    """Suppress RDKit's C++ warning/error stream within the block.
+
+    RDKit emits valence and substructure-match warnings directly to
+    stderr from C++, bypassing Python's logging module. During pose
+    standardization and RMSD computation, these can flood the console
+    with hundreds of duplicate messages per target. This context
+    manager silences them at entry and re-enables at exit.
+    """
+    RDLogger.DisableLog("rdApp.error")
+    RDLogger.DisableLog("rdApp.warning")
+    try:
+        yield
+    finally:
+        RDLogger.EnableLog("rdApp.error")
+        RDLogger.EnableLog("rdApp.warning")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Module-level worker for parallel RMSD matrix computation.
+# Must be top-level (not a staticmethod) so multiprocessing can pickle it.
+# ─────────────────────────────────────────────────────────────────
+def _pair_rmsd(args: Tuple[Optional[Chem.Mol], Optional[Chem.Mol]]) -> float:
+    """Compute symmetry-aware heavy-atom RMSD for one pose pair.
+
+    Returns 100.0 as a sentinel for any failure mode (None mol, RDKit
+    rejection, mismatched atom counts) so the caller can blanket-fill
+    the matrix without conditional branches.
+    """
+    mol_i, mol_j = args
+    if mol_i is None or mol_j is None:
+        return 100.0
+    try:
+        return float(rdMolAlign.GetBestRMS(mol_i, mol_j))
+    except (ValueError, RuntimeError):
+        if mol_i.GetNumAtoms() != mol_j.GetNumAtoms():
+            return 100.0
+        try:
+            coords_i = mol_i.GetConformer().GetPositions()
+            coords_j = mol_j.GetConformer().GetPositions()
+            diff = coords_i - coords_j
+            return float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
+        except (ValueError, RuntimeError):
+            return 100.0
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -168,8 +218,9 @@ class ConsensusAnalyzer:
         try:
             if engine in (EngineType.GNINA, EngineType.SMINA):
                 return self._load_sdf(path)
+            elif engine == EngineType.LEDOCK:
+                return self._load_dok(path)
             else:
-                # SMINA (PDBQT) and LeDock (PDB/DOK) need conversion via obabel
                 return self._load_via_obabel(path, engine)
         except Exception as e:
             logger.error(
@@ -198,32 +249,22 @@ class ConsensusAnalyzer:
 
     @staticmethod
     def _load_via_obabel(path: str, engine: EngineType) -> List[Chem.Mol]:
-        """Load PDBQT or PDB via Open Babel conversion to SDF.
-        
-        Parameters
-        ----------
-        path : str
-            Path to PDBQT or PDB file.
-        engine : EngineType
-            SMINA or LEDOCK.
-            
-        Returns
-        -------
-        List[Chem.Mol]
-            Converted molecules.
+        """Load PDBQT via Open Babel conversion to SDF.
+
+        Currently unused in the dispatcher (GNINA/SMINA route through
+        _load_sdf, LEDOCK routes through _load_dok). Retained for
+        future format additions or experimental engines.
         """
         try:
-            # Determine obabel input format
             input_fmt = "-ipdbqt" if engine == EngineType.SMINA else "-ipdb"
-            
+
             result = subprocess.run(
                 ["obabel", input_fmt, path, "-osdf"],
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            
-            # Parse SDF from stdout
+
             supplier = Chem.ForwardSDMolSupplier(
                 io.BytesIO(result.stdout.encode()),
                 removeHs=True,
@@ -232,13 +273,77 @@ class ConsensusAnalyzer:
             mols = [mol for mol in supplier if mol is not None]
             logger.debug(f"Converted {len(mols)} molecules via obabel from {engine.name}")
             return mols
-            
+
         except subprocess.CalledProcessError as e:
             logger.error(f"obabel conversion failed for {engine.name}: {e.stderr}")
             return []
         except Exception as e:
             logger.error(f"Unexpected error loading {engine.name} file: {e}")
             return []
+
+    @staticmethod
+    def _load_dok(path: str) -> List[Chem.Mol]:
+        """Load all poses from a LeDock .dok file.
+
+        LeDock's .dok format concatenates poses as PDB-like blocks
+        separated by 'REMARK Cluster N' headers. obabel's -ipdb reader
+        only catches the first model and stops, which silently dropped
+        all but one pose. This splits the file at REMARK Cluster
+        boundaries and converts each pose block independently.
+
+        Returns
+        -------
+        List[Chem.Mol]
+            All poses extracted from the file. Empty list if the file
+            is missing, unparseable, or contains no recognizable poses.
+        """
+        try:
+            with open(path, "r") as f:
+                content = f.read()
+        except OSError as e:
+            logger.error(f"Could not read .dok file {path}: {e}")
+            return []
+
+        # Split at "REMARK Cluster" markers. The first chunk is anything
+        # before the first marker (file header / preamble) and is discarded.
+        chunks = re.split(r"^REMARK\s+Cluster\b", content, flags=re.MULTILINE)
+        if len(chunks) < 2:
+            logger.warning(
+                f".dok file has no 'REMARK Cluster' markers; "
+                f"falling back to single-block parse: {path}"
+            )
+            pose_blocks = [content]
+        else:
+            pose_blocks = ["REMARK Cluster" + chunk for chunk in chunks[1:]]
+
+        mols: List[Chem.Mol] = []
+        for idx, block in enumerate(pose_blocks):
+            try:
+                result = subprocess.run(
+                    ["obabel", "-ipdb", "-osdf"],
+                    input=block,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                logger.debug(f"obabel failed on .dok pose {idx}: {e.stderr}")
+                continue
+
+            supplier = Chem.ForwardSDMolSupplier(
+                io.BytesIO(result.stdout.encode()),
+                removeHs=True,
+                sanitize=False,
+            )
+            for mol in supplier:
+                if mol is not None:
+                    mols.append(mol)
+
+        logger.debug(
+            f"Extracted {len(mols)} poses from .dok across "
+            f"{len(pose_blocks)} cluster block(s): {path}"
+        )
+        return mols
 
     # ─────────────────────────────────────────────────────────────
     # Master Template Resolution
@@ -442,52 +547,85 @@ class ConsensusAnalyzer:
     ) -> Tuple[List[Chem.Mol], List[Dict]]:
         """Load and standardize topologies across engines.
 
+        Per-pose bond-order failures are aggregated into a single summary
+        log line at the end rather than one warning per pose. RDKit's
+        C++ stderr stream is also silenced during this phase since its
+        valence/substructure messages are duplicates of what we already
+        track via fail_counts.
+
         Returns
         -------
         Tuple[List[Chem.Mol], List[Dict]]
             Processed molecules and metadata.
         """
-        processed_poses = []
-        metadata = []
+        processed_poses: List[Chem.Mol] = []
+        metadata: List[Dict] = []
+        fail_counts: Dict[str, int] = {}
+        total_counts: Dict[str, int] = {}
 
-        for dr in successful_results:
-            mols = self._load_molecule(dr.output_path, dr.engine)
+        with _quiet_rdkit():
+            for dr in successful_results:
+                mols = self._load_molecule(dr.output_path, dr.engine)
+                engine = dr.engine.name
 
-            for idx, mol in enumerate(mols):
-                try:
-                    std_mol = self._assign_bond_orders(mol, dr.engine.name, idx)
+                for idx, mol in enumerate(mols):
+                    total_counts[engine] = total_counts.get(engine, 0) + 1
+                    try:
+                        std_mol, ok = self._assign_bond_orders(mol, engine, idx)
+                    except Exception as e:
+                        logger.error(
+                            f"Unexpected error standardizing {engine} pose {idx}: {e}",
+                            exc_info=True,
+                        )
+                        continue
+
+                    if not ok:
+                        fail_counts[engine] = fail_counts.get(engine, 0) + 1
+
                     processed_poses.append(std_mol)
                     metadata.append({
-                        "engine": dr.engine.name,
+                        "engine": engine,
                         "pose_index": idx,
                         "output_file": dr.output_path,
                     })
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error standardizing {dr.engine.name} pose {idx}: {e}",
-                        exc_info=True,
-                    )
-                    continue
 
-        logger.info(f"Standardized {len(processed_poses)} poses from {len(successful_results)} engines")
+        if fail_counts:
+            breakdown = ", ".join(
+                f"{eng} {fail_counts[eng]}/{total_counts[eng]}"
+                for eng in sorted(fail_counts)
+            )
+            logger.warning(
+                f"Bond order standardization fell back to input topology for "
+                f"{sum(fail_counts.values())}/{sum(total_counts.values())} "
+                f"poses ({breakdown})"
+            )
+
+        logger.info(
+            f"Standardized {len(processed_poses)} poses from "
+            f"{len(successful_results)} engines"
+        )
         return processed_poses, metadata
 
     def _assign_bond_orders(
         self, mol: Chem.Mol, engine_name: str, pose_idx: int
-    ) -> Chem.Mol:
+    ) -> Tuple[Chem.Mol, bool]:
         """Assign bond orders from master template, with heavy-atom fallback.
 
         Stage 1 attempts direct template assignment. Stage 2 strips hydrogens
-        from both the mol and template before retrying — this handles the
-        common case where the engine output has implicit Hs that confuse
-        the bond perception in AssignBondOrdersFromTemplate.
+        from both the mol and template before retrying — handles the common
+        case where the engine output has implicit Hs that confuse the bond
+        perception in AssignBondOrdersFromTemplate.
 
-        If both stages fail, the input mol is returned with its original
-        topology and a warning is logged. The pose is still kept rather
-        than dropped to preserve the existing pipeline behavior.
+        Returns
+        -------
+        Tuple[Chem.Mol, bool]
+            The standardized mol (or the original mol on total failure)
+            and a flag indicating whether either stage succeeded.
+            Per-pose diagnostic detail is at DEBUG level; the caller
+            aggregates failures into a single summary warning.
         """
         try:
-            return AllChem.AssignBondOrdersFromTemplate(self.master_ref, mol)
+            return AllChem.AssignBondOrdersFromTemplate(self.master_ref, mol), True
         except (ValueError, RuntimeError) as e:
             logger.debug(
                 f"Direct bond order assignment failed for {engine_name} pose {pose_idx}: {e}"
@@ -496,56 +634,65 @@ class ConsensusAnalyzer:
         try:
             mol_heavy = Chem.RemoveHs(mol, sanitize=False)
             ref_heavy = Chem.RemoveHs(self.master_ref)
-            return AllChem.AssignBondOrdersFromTemplate(ref_heavy, mol_heavy)
+            return AllChem.AssignBondOrdersFromTemplate(ref_heavy, mol_heavy), True
         except (ValueError, RuntimeError) as e:
-            logger.warning(
+            logger.debug(
                 f"Heavy-atom bond order assignment failed for {engine_name} "
                 f"pose {pose_idx}: {e}; using input topology as-is"
             )
 
-        return mol
+        return mol, False
 
     @staticmethod
     def _compute_rmsd_matrix(mols: List[Chem.Mol]) -> np.ndarray:
-        """Compute pairwise Heavy-Atom RMSD matrix with Euclidean fallback."""
+        """Compute pairwise Heavy-Atom RMSD matrix.
+
+        Parallelizes across CPU cores when pose count exceeds
+        cfg.rmsd_parallel_threshold. Below the threshold, the
+        process-pool startup cost outweighs the savings, so we go
+        sequential. RDKit C++ warnings are silenced for the duration —
+        on fork-based platforms (Linux/Colab) the silencing carries
+        into Pool workers via inherited state.
+        """
         n = len(mols)
         matrix = np.zeros((n, n), dtype=np.float32)
 
-        # Pre-strip hydrogens for all molecules to ensure strict Heavy-Atom RMSD
-        heavy_mols = []
-        for m in mols:
-            try:
-                heavy_mols.append(Chem.RemoveHs(m))
-            except (ValueError, RuntimeError) as e:
-                logger.debug(f"Could not strip hydrogens for RMSD matrix entry: {e}")
-                heavy_mols.append(None)
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                mol_i = heavy_mols[i]
-                mol_j = heavy_mols[j]
-
-                if mol_i is None or mol_j is None:
-                    matrix[i, j] = matrix[j, i] = 100.0
-                    continue
-
+        with _quiet_rdkit():
+            # Pre-strip hydrogens for all molecules to ensure strict Heavy-Atom RMSD
+            heavy_mols: List[Optional[Chem.Mol]] = []
+            for m in mols:
                 try:
-                    # Attempt standard symmetry-aware heavy-atom RMSD
-                    rmsd = rdMolAlign.GetBestRMS(mol_i, mol_j)
-                    matrix[i, j] = matrix[j, i] = rmsd
-                except Exception as e:
-                    # Fallback: strict coordinate RMSD if atom counts match (bypassing RDKit graph strictness)
-                    if mol_i.GetNumAtoms() == mol_j.GetNumAtoms():
-                        try:
-                            coords_i = mol_i.GetConformer().GetPositions()
-                            coords_j = mol_j.GetConformer().GetPositions()
-                            diff = coords_i - coords_j
-                            rmsd = float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
-                            matrix[i, j] = matrix[j, i] = rmsd
-                        except Exception as e2:
-                            matrix[i, j] = matrix[j, i] = 100.0
-                    else:
-                        matrix[i, j] = matrix[j, i] = 100.0
+                    heavy_mols.append(Chem.RemoveHs(m))
+                except (ValueError, RuntimeError) as e:
+                    logger.debug(f"Could not strip hydrogens for RMSD matrix entry: {e}")
+                    heavy_mols.append(None)
+
+            pairs: List[Tuple[int, int]] = [
+                (i, j) for i in range(n) for j in range(i + 1, n)
+            ]
+            if not pairs:
+                return matrix
+
+            cfg = get_config().consensus
+            threshold = cfg.rmsd_parallel_threshold
+            n_workers = cfg.rmsd_n_workers
+            if n_workers <= 0:
+                n_workers = max(1, (os.cpu_count() or 4) // 2)
+
+            if n < threshold or n_workers <= 1:
+                rmsds = [_pair_rmsd((heavy_mols[i], heavy_mols[j])) for i, j in pairs]
+            else:
+                logger.debug(
+                    f"Computing {len(pairs)} pairwise RMSDs across {n_workers} workers"
+                )
+                with multiprocessing.Pool(processes=n_workers) as pool:
+                    rmsds = pool.map(
+                        _pair_rmsd,
+                        ((heavy_mols[i], heavy_mols[j]) for i, j in pairs),
+                    )
+
+            for (i, j), rmsd in zip(pairs, rmsds):
+                matrix[i, j] = matrix[j, i] = rmsd
 
         return matrix
 

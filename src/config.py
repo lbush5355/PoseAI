@@ -37,7 +37,13 @@ class ConsensusConfig:
     
     # Ideal cluster size (poses) for scoring normalization
     ideal_cluster_size: int = 10
-    
+
+    # RMSD matrix parallelization. Sequential below the threshold (where
+    # multiprocessing overhead exceeds the savings); parallel above it.
+    # Set rmsd_n_workers to 1 to force sequential regardless of size.
+    rmsd_parallel_threshold: int = 30
+    rmsd_n_workers: int = 0  # 0 = auto: max(1, cpu_count // 2)
+
     # Default ligand SMILES (Imatinib/STI)
     # Override with ligand_smiles parameter in ConsensusAnalyzer
     default_ligand_smiles: str = (

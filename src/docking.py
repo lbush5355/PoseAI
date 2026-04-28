@@ -25,9 +25,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
-# Module-level logger
+# Module-level logger and caches
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("poseai.docking")
+
+# nvidia-smi probe result cached on first HardwareProfile._check_cuda() call.
+# Avoids paying ~2s per HardwareProfile() instantiation in batch loops.
+_CUDA_CHECK_CACHE: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +50,12 @@ class DockingConfig:
     # Timeout enforcement
     DEFAULT_ENGINE_TIMEOUT = 3600.0  # 1 hour per engine
     POOL_TIMEOUT_FACTOR = 1.5        # Pool timeout = engine_timeout * factor
-    
+
+    # SMINA energy filtering. Smina's default is 3 kcal/mol from the best
+    # pose, which silently drops most modes when exhaustiveness is high.
+    # Widening the window lets all requested num_modes survive to output.
+    SMINA_ENERGY_RANGE = 10.0
+
     # Process management
     DEFAULT_POLL_INTERVAL = 0.5  # Seconds between future checks
     STREAM_BUFFER_LIMIT = 50_000  # Max log lines per engine
@@ -157,12 +166,15 @@ class HardwareProfile:
     @staticmethod
     def _check_cuda() -> bool:
         """Check for NVIDIA GPU via nvidia-smi.
-        
-        Returns
-        -------
-        bool
-            True if nvidia-smi returns 0.
+
+        Result is cached at module level on first call. Subsequent
+        HardwareProfile() instantiations skip the ~2s nvidia-smi probe,
+        which matters in batch validation where we create a new
+        EnsembleManager per target.
         """
+        global _CUDA_CHECK_CACHE
+        if _CUDA_CHECK_CACHE is not None:
+            return _CUDA_CHECK_CACHE
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--list-gpus"],
@@ -170,11 +182,13 @@ class HardwareProfile:
                 text=True,
                 timeout=2,
             )
-            available = result.returncode == 0 and result.stdout.strip()
+            available = bool(result.returncode == 0 and result.stdout.strip())
             if available:
                 logger.info("CUDA GPU detected")
+            _CUDA_CHECK_CACHE = available
             return available
         except Exception:
+            _CUDA_CHECK_CACHE = False
             return False
 
 
@@ -393,10 +407,11 @@ class EnsembleManager:
         output_dir: str,
         exhaustiveness: int = 8,
         num_modes: int = 9,
+        energy_range: float = DockingConfig.SMINA_ENERGY_RANGE,
         timeout: Optional[float] = None,
     ) -> DockingResult:
         """Execute Smina docking.
-        
+
         Parameters
         ----------
         receptor : str
@@ -413,9 +428,13 @@ class EnsembleManager:
             Search exhaustiveness (1-8).
         num_modes : int
             Number of output poses.
+        energy_range : float
+            Maximum kcal/mol from the best pose for a mode to be retained.
+            Smina's default of 3.0 silently drops most modes at high
+            exhaustiveness; widen this to let num_modes poses survive.
         timeout : float, optional
             Timeout in seconds.
-            
+
         Returns
         -------
         DockingResult
@@ -435,6 +454,7 @@ class EnsembleManager:
             "--out", output_path,
             "--exhaustiveness", str(exhaustiveness),
             "--num_modes", str(num_modes),
+            "--energy_range", str(energy_range),
             "--cpu", str(self.hw.smina_threads),
         ]
         return _execute_engine(cmd, "SMINA", output_path, timeout=timeout)
@@ -675,12 +695,11 @@ class EnsembleManager:
                         engine_dir, exhaustiveness, num_modes, cnn_scoring, timeout,
                     )
                 elif engine is EngineType.SMINA:
-                    args = []
-                    args.extend(['--energy_range', '10'])
                     future = pool.submit(
                         self.run_smina,
                         receptor, ligand, center, box_size,
-                        engine_dir, exhaustiveness, num_modes, timeout,
+                        engine_dir, exhaustiveness, num_modes,
+                        DockingConfig.SMINA_ENERGY_RANGE, timeout,
                     )
                 elif engine is EngineType.LEDOCK:
                     future = pool.submit(

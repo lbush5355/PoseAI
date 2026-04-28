@@ -49,8 +49,12 @@ PoseAI/
                           dynamically fetches ligand SMILES from RCSB.
                           fetch_rcsb_ideal_sdf(): downloads the RCSB
                           ideal SDF for a ligand code; cached on disk.
-                          extract_ligand_code_from_mol2(): infers RCSB
-                          residue code from a PDBbind-format mol2 file.
+                          fetch_rcsb_entry_ligand_codes(): GraphQL
+                          lookup of non-polymer ligand codes for a PDB
+                          entry, filtered to drug-like candidates.
+                          extract_ligand_code_candidates_from_mol2():
+                          generates fallback candidate codes from a
+                          mol2 substructure name (residue-number stripping).
     site_finder.py     -- PocketAnalyzer: fpocket wrapper, pocket barycenter
                           parsing, docking box parameters. Currently not the
                           active pocket detection code path.

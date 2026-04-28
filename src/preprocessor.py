@@ -467,6 +467,69 @@ def fetch_rcsb_smiles(ligand_code: str) -> Optional[str]:
     return None
 
 
+# Common buffers, ions, and crystallization additives — filtered out when
+# picking a drug-like ligand from an RCSB entry's non-polymer entities.
+_NON_DRUG_LIKE_CODES = {
+    "HOH", "DOD", "NA", "K", "MG", "CA", "ZN", "FE", "MN", "NI", "CU", "CO",
+    "CD", "HG", "PB", "CL", "BR", "F", "I", "SO4", "PO4", "NO3", "CO3",
+    "ACT", "EDO", "GOL", "PEG", "PG4", "PG6", "MES", "TRS", "BME", "DMS",
+    "DMF", "MOH", "EOH", "IMD", "FMT", "ACE", "CIT", "MPD", "EPE", "BCT",
+}
+
+
+def fetch_rcsb_entry_ligand_codes(pdb_id: str) -> List[str]:
+    """Look up non-polymer ligand chemical component IDs for a PDB entry.
+
+    Uses RCSB's GraphQL API to get all non-polymer entities and their
+    chemical component codes in a single request. Common buffers, ions,
+    and crystallization additives are filtered out so the drug-like
+    ligand candidates rise to the top.
+
+    Returns a list of candidate codes (often just one for a typical
+    drug-bound structure). Returns an empty list if the entry has no
+    non-polymer entities (e.g., peptidomimetic inhibitors that are
+    deposited as polymer chains rather than HETATMs — 1A30 is one),
+    or if the API call fails.
+    """
+    query = (
+        "query($id: String!) { "
+        "entry(entry_id: $id) { "
+        "nonpolymer_entities { pdbx_entity_nonpoly { comp_id } } "
+        "} }"
+    )
+
+    try:
+        resp = requests.post(
+            "https://data.rcsb.org/graphql",
+            json={"query": query, "variables": {"id": pdb_id.upper()}},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.warning(f"RCSB entry lookup failed for {pdb_id}: {e}")
+        return []
+    except ValueError as e:
+        logger.warning(f"RCSB entry lookup returned invalid JSON for {pdb_id}: {e}")
+        return []
+
+    entry = (data.get("data") or {}).get("entry") or {}
+    entities = entry.get("nonpolymer_entities") or []
+
+    codes: List[str] = []
+    for entity in entities:
+        comp_id = ((entity or {}).get("pdbx_entity_nonpoly") or {}).get("comp_id")
+        if not comp_id:
+            continue
+        upper = comp_id.upper()
+        if upper in _NON_DRUG_LIKE_CODES:
+            continue
+        if upper not in codes:
+            codes.append(upper)
+
+    return codes
+
+
 def fetch_rcsb_ideal_sdf(
     ligand_code: str, save_dir: str
 ) -> Optional[str]:
@@ -479,7 +542,8 @@ def fetch_rcsb_ideal_sdf(
 
     The file is cached on disk after first download. Returns None on
     network failure, missing-ligand 404, or filesystem error so the
-    caller can fall back to other topology sources.
+    caller can fall back to other topology sources or other candidate
+    codes.
     """
     code = ligand_code.upper()
     save_path = os.path.join(save_dir, f"{code}_ideal.sdf")
@@ -506,24 +570,27 @@ def fetch_rcsb_ideal_sdf(
         logger.error(f"Could not write ideal SDF to {save_path}: {e}")
         return None
 
-    logger.info(f"Cached ideal SDF for {code}: {save_path}")
+    logger.warning(f"Cached ideal SDF for {code} → {save_path}")
     return save_path
 
 
-def extract_ligand_code_from_mol2(mol2_path: str) -> Optional[str]:
-    """Extract the 1-3 character RCSB residue code from a MOL2 file.
+def extract_ligand_code_candidates_from_mol2(mol2_path: str) -> List[str]:
+    """Generate candidate RCSB ligand codes from a MOL2 file's first ATOM record.
 
-    Reads the substructure name from the first ATOM record and strips
-    trailing residue numbers (e.g., "STI301" → "STI"). Returns None if
-    no valid 1-3 alphanumeric code can be identified — which is fine,
-    callers fall back to other paths when the code is unknown.
+    Mol2 substructure names typically concatenate the residue code with
+    a residue number (e.g., "MK11", "STI301", "Z34"), and the boundary
+    isn't unambiguous without external context — codes themselves can
+    end in digits. We progressively strip trailing digits and yield each
+    1-3 character candidate; the caller validates by attempting an
+    actual fetch (first 200 OK wins).
 
-    Useful for batch validation where each PDBbind target's mol2 is the
-    only authoritative source for which RCSB chemical component it is.
+    Returns an empty list if the mol2 is missing or has no recognizable
+    substructure name.
     """
     if not os.path.exists(mol2_path):
-        return None
+        return []
 
+    subst_name: Optional[str] = None
     try:
         with open(mol2_path) as f:
             in_atom_section = False
@@ -536,15 +603,28 @@ def extract_ligand_code_from_mol2(mol2_path: str) -> Optional[str]:
                     if stripped.startswith("@<TRIPOS>"):
                         break
                     fields = stripped.split()
-                    if len(fields) >= 8:
+                    if len(fields) >= 8 and fields[7]:
                         subst_name = fields[7]
-                        code = re.sub(r"\d+$", "", subst_name).upper()
-                        if 1 <= len(code) <= 3 and code.isalnum():
-                            return code
+                        break
     except OSError as e:
         logger.warning(f"Could not read mol2 for residue code extraction: {e}")
+        return []
 
-    return None
+    if not subst_name:
+        return []
+
+    candidates: List[str] = []
+    base = subst_name.upper()
+
+    if 1 <= len(base) <= 3 and base.isalnum():
+        candidates.append(base)
+
+    while base and base[-1].isdigit():
+        base = base[:-1]
+        if 1 <= len(base) <= 3 and base.isalnum() and base not in candidates:
+            candidates.append(base)
+
+    return candidates
 
 
 def get_ligand_centroid(

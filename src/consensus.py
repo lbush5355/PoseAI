@@ -385,8 +385,8 @@ class ConsensusAnalyzer:
         if self.topology_template_path:
             mol = self._try_load_reference(self.topology_template_path)
             if mol is not None:
-                logger.info(
-                    f"Master template from ideal SDF "
+                logger.warning(
+                    f"Master template ← ideal SDF "
                     f"({mol.GetNumAtoms()} heavy atoms): {self.topology_template_path}"
                 )
                 return mol
@@ -399,8 +399,8 @@ class ConsensusAnalyzer:
         if self.reference_ligand_path:
             mol = self._try_load_reference(self.reference_ligand_path)
             if mol is not None:
-                logger.info(
-                    f"Master template from crystal reference "
+                logger.warning(
+                    f"Master template ← crystal reference "
                     f"({mol.GetNumAtoms()} heavy atoms): {self.reference_ligand_path}"
                 )
                 return mol
@@ -413,8 +413,8 @@ class ConsensusAnalyzer:
         if self.ligand_smiles:
             mol = self._try_parse_smiles_with_retry(self.ligand_smiles)
             if mol is not None:
-                logger.info(
-                    f"Master template from SMILES ({mol.GetNumAtoms()} heavy atoms)"
+                logger.warning(
+                    f"Master template ← SMILES ({mol.GetNumAtoms()} heavy atoms)"
                 )
                 return mol
             logger.warning(
@@ -427,8 +427,8 @@ class ConsensusAnalyzer:
             mol = self._try_parse_smiles_with_retry(inferred)
             if mol is not None:
                 self.ligand_smiles = inferred
-                logger.info(
-                    f"Master template inferred from docking output "
+                logger.warning(
+                    f"Master template ← inferred from docking output "
                     f"({mol.GetNumAtoms()} heavy atoms)"
                 )
                 return mol

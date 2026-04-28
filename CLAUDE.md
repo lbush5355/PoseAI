@@ -27,7 +27,10 @@ PoseAI/
                           get_config()); env-var overrides via POSEAI_*
     consensus.py       -- ConsensusAnalyzer: topology standardization,
                           pairwise RMSD matrix, HDBSCAN clustering,
-                          confidence scoring.
+                          confidence scoring. Master template resolved
+                          via _resolve_master_template() in priority
+                          order: reference_ligand_path (mol2/sdf/pdb)
+                          > SMILES > stereo-stripped retry > 3D-inferred.
                           calculate_native_rmsd(): standalone function,
                           strict in-place heavy-atom RMSD between predicted
                           pose and crystal structure (no alignment).
@@ -125,10 +128,12 @@ Runtime paths (for context only):
 
 2. **Preprocessing** (preprocessor.py)
    - Fetch PDB from RCSB, strip waters, assign Gasteiger charges
-   - Isolate ligand by 3-letter residue code (single chain only)
+   - Isolate ligand by 1-3 alphanumeric residue code (single chain only)
    - Generate receptor PDBQT (Smina/Gnina) and clean PDB (LeDock)
    - Generate ligand PDBQT (Smina/Gnina) and MOL2 (LeDock)
-   - Fetch ligand SMILES dynamically via fetch_rcsb_smiles()
+   - Fetch ligand SMILES dynamically via fetch_rcsb_smiles() — used
+     as a fallback template source by ConsensusAnalyzer when no
+     crystal mol2 is available
 
 3. **Pocket Detection** (preprocessor.py)
    - Active method: get_ligand_centroid() in preprocessor.py
@@ -157,9 +162,15 @@ Runtime paths (for context only):
    - Score confidence based on engine agreement and cluster size
 
 6. **Validation** (consensus.py)
-   - Call calculate_native_rmsd() on consensus poses against crystal
-     structure MOL2
-   - Strict in-place heavy-atom RMSD -- no alignment applied
+   - Single-target run (Cell 4 of PoseAI.ipynb): call
+     calculate_native_rmsd() with explicit reference_smiles to compute
+     strict in-place heavy-atom RMSD against the crystal mol2.
+   - Batch validation (Cell 5 of PoseAI.ipynb): use analyzer.master_ref
+     as the reference and rdMolAlign.CalcRMS for the comparison. Both
+     master_ref and the predicted poses are derived from the same
+     crystal mol2 source via _resolve_master_template, so chemical
+     graphs are guaranteed isomorphic.
+   - No alignment applied in either path; comparison is in-place.
    - Grading scale:
      - < 2.0 angstroms: Success (near-native pose)
      - 2.0 - 3.0 angstroms: Acceptable

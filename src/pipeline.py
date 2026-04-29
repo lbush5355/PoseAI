@@ -60,6 +60,11 @@ class TargetResult:
     is None when no clusters formed or the RMSD calculation itself failed.
     Cells consuming this object should branch on `status` rather than
     re-deriving it.
+
+    error_message is set when status="Error" — it carries the exception
+    type and message so the failure is visible on the result row (and
+    therefore in run_history.csv) rather than only in stderr. Empty
+    string for non-Error statuses keeps CSV columns regular.
     """
 
     target_id: str
@@ -75,6 +80,7 @@ class TargetResult:
     best_pose_indices: Optional[np.ndarray] = None
     native_rmsd: Optional[float] = None
     confidence: float = 0.0
+    error_message: str = ""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -255,13 +261,35 @@ def _run_pipeline(
     if cluster_df is None or cluster_df.empty:
         return TargetResult(status="No Clusters", **base)
 
-    best_cluster_id = int(cluster_df.iloc[0]["Cluster"])
-    best_indices = np.where(analyzer.cluster_labels == best_cluster_id)[0]
-    top_pose_mol = Chem.RemoveHs(analyzer.all_poses[best_indices[0]])
+    # Post-clustering extraction can fail in ways that are pose-data-specific
+    # (e.g., RDKit's valence checker rejects a pose with an over-valent N from
+    # an engine output, raising ValueError out of Chem.RemoveHs). Without this
+    # wrap such an exception escapes run_from_local() and the caller loses the
+    # cluster_df, the analyzer, and the docking_results — all useful for
+    # post-mortem inspection. Catching here is NOT a silent suppression: we
+    # log type(e).__name__ and the message, attach the same string to
+    # TargetResult.error_message so it appears in run_history.csv, and set
+    # status="Error" so _grade_rmsd's contract is preserved.
+    try:
+        best_cluster_id = int(cluster_df.iloc[0]["Cluster"])
+        best_indices = np.where(analyzer.cluster_labels == best_cluster_id)[0]
+        top_pose_mol = Chem.RemoveHs(analyzer.all_poses[best_indices[0]])
 
-    native_rmsd = _compute_native_rmsd(analyzer, ligand_mol2, top_pose_mol)
-    confidence = analyzer.get_confidence_score(cluster_df)
-    status = _grade_rmsd(native_rmsd)
+        native_rmsd = _compute_native_rmsd(analyzer, ligand_mol2, top_pose_mol)
+        confidence = analyzer.get_confidence_score(cluster_df)
+        status = _grade_rmsd(native_rmsd)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        logger.error(
+            f"Post-clustering pose extraction failed for {target_id} ({err}); "
+            f"reporting Status=Error with cluster_df preserved for inspection",
+            exc_info=True,
+        )
+        return TargetResult(
+            status="Error",
+            error_message=err,
+            **base,
+        )
 
     return TargetResult(
         status=status,

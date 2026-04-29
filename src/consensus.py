@@ -806,7 +806,17 @@ class ConsensusAnalyzer:
         
         df_sum = pd.DataFrame(summary)
         if df_sum.empty: return df_sum
-        return df_sum.sort_values("Size", ascending=False).reset_index(drop=True)
+        # Primary sort: engine count descending (3-engine consensus > 2-engine).
+        # Tiebreaker 1: cluster size descending (more converged poses = stronger signal).
+        # Tiebreaker 2: intra-cluster RMSD ascending (tighter cluster = higher pose
+        # convergence confidence). Using size-only previously caused 1OWE to flip
+        # between a correct 0.23 Å cluster and a decoy 8.86 Å cluster across runs
+        # when two clusters had equal size — this ordering is deterministic and
+        # chemically motivated without peeking at the crystal structure.
+        return df_sum.sort_values(
+            by=["Num_Engines", "Size", "RMSD"],
+            ascending=[False, False, True],
+        ).reset_index(drop=True)
 
     # ─────────────────────────────────────────────────────────────
     # Confidence Scoring

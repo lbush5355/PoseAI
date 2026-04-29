@@ -254,6 +254,16 @@ Runtime paths (for context only):
 
 ### Resolved
 
+- Cell 1 binary verification: previously CLAUDE.md claimed downloads
+  were "verified as valid ELF files matching the host architecture"
+  but Cell 1 just ran wget with no validation, so HTML error pages
+  and partial downloads silently became "binaries" that broke the
+  pipeline at subprocess.Popen with [Errno 8] Exec format error. Now
+  implemented via utils.download_and_verify_binary(), which reads the
+  ELF header (magic + e_machine), deletes-and-raises on any mismatch,
+  and skips re-download only when the existing file already validates.
+  Also recovers from a stale corrupt file in /content/fast_lane/bin/
+  by detecting the bad header and re-downloading.
 - Hardcoded STI SMILES: SMILES now fetched dynamically via
   fetch_rcsb_smiles() based on LIGAND_CODE
 - Pool-level timeout: enforced via as_completed(timeout=pool_timeout)
@@ -402,10 +412,14 @@ Downloaded fresh each Colab session by PoseAI.ipynb setup cells.
 
 ### Binary Verification
 
-After download, each binary is verified as a valid ELF file matching
-the host architecture. An HTML error page or ARM binary will be caught
-before the pipeline runs. Use utils.py check_environment() to verify
-all binaries are on PATH before executing.
+Each binary download in Cell 1 routes through
+utils.download_and_verify_binary(), which reads the ELF header after
+wget and rejects anything whose magic bytes are not \x7fELF or whose
+e_machine field is not EM_X86_64 (0x3E). Failures delete the file and
+raise — there is no path by which an HTML error page or wrong-arch
+binary can persist on disk past Cell 1. A corrupt file from a previous
+session is detected and re-downloaded automatically. Use utils.py
+check_environment() to additionally verify all binaries are on PATH.
 
 ---
 

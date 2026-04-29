@@ -18,9 +18,114 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 from datetime import datetime
-from typing import List
+from typing import List, Tuple
+
+logger = logging.getLogger("poseai.utils")
+
+# x86-64 ELF e_machine value (EM_X86_64). Used to reject binaries built for
+# the wrong architecture (a real risk if Colab assigns a non-x86_64 host).
+_EM_X86_64 = 0x3E
+
+
+def _read_elf_header(path: str) -> Tuple[bytes, int, int]:
+    """Return (magic, ei_class, e_machine) from a candidate ELF file.
+
+    Raises OSError if the file is shorter than a full ELF header (52 bytes
+    minimum for ELF32, 64 for ELF64; 20 is enough to extract the fields we
+    need: magic, EI_CLASS, e_machine).
+    """
+    with open(path, "rb") as f:
+        header = f.read(20)
+    if len(header) < 20:
+        raise OSError(f"file too short to be an ELF: {len(header)} bytes")
+    return header[:4], header[4], int.from_bytes(header[0x12:0x14], "little")
+
+
+def _looks_like_x86_64_elf(path: str) -> bool:
+    """True iff path is an ELF with e_machine == EM_X86_64."""
+    try:
+        magic, _ei_class, e_machine = _read_elf_header(path)
+    except OSError:
+        return False
+    return magic == b"\x7fELF" and e_machine == _EM_X86_64
+
+
+def _remove_if_exists(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def download_and_verify_binary(
+    url: str, dest_path: str, name: str, *, skip_if_valid: bool = True
+) -> None:
+    """Download a binary and verify it is an x86-64 ELF before keeping it.
+
+    Cell 1's previous wget calls would silently write whatever the server
+    returned — HTML error pages, rate-limit responses, partial content.
+    chmod +x then ran on garbage and the existence check happily skipped
+    re-download on every subsequent session, leaving the runtime in a
+    broken state until manual cleanup. This helper closes that loophole:
+    on any failure mode (bad rc, short file, wrong magic, wrong arch),
+    it deletes the file and raises a clear error.
+
+    Parameters
+    ----------
+    url : str
+        Source URL. Must support ``-L`` redirects (sourceforge, github).
+    dest_path : str
+        Filesystem destination.
+    name : str
+        Human-readable name for log lines and error messages.
+    skip_if_valid : bool
+        When True (default) and ``dest_path`` already holds a valid x86-64
+        ELF, no download is attempted. A present-but-corrupt file is always
+        re-downloaded regardless of this flag.
+    """
+    if skip_if_valid and os.path.exists(dest_path) and _looks_like_x86_64_elf(dest_path):
+        logger.debug(f"{name} already present and valid: {dest_path}")
+        return
+
+    if os.path.exists(dest_path):
+        logger.warning(f"{name} present but invalid; re-downloading from {url}")
+        _remove_if_exists(dest_path)
+
+    logger.info(f"Downloading {name} from {url}")
+    rc = os.system(
+        f"wget -q -L {shlex.quote(url)} -O {shlex.quote(dest_path)}"
+    )
+    if rc != 0:
+        _remove_if_exists(dest_path)
+        raise RuntimeError(f"{name} download failed (wget rc={rc}): {url}")
+
+    try:
+        magic, _ei_class, e_machine = _read_elf_header(dest_path)
+    except OSError as e:
+        _remove_if_exists(dest_path)
+        raise RuntimeError(
+            f"{name} download produced no usable file ({e}): {url}"
+        )
+
+    if magic != b"\x7fELF":
+        _remove_if_exists(dest_path)
+        raise RuntimeError(
+            f"{name} is not an ELF binary (magic={magic!r}). Source URL "
+            f"likely returned an HTML error or rate-limit page: {url}"
+        )
+
+    if e_machine != _EM_X86_64:
+        _remove_if_exists(dest_path)
+        raise RuntimeError(
+            f"{name} is wrong architecture (e_machine=0x{e_machine:x}); "
+            f"expected x86-64 (0x{_EM_X86_64:x}): {url}"
+        )
+
+    os.chmod(dest_path, 0o755)
+    logger.info(f"{name} verified: x86-64 ELF at {dest_path}")
 
 
 class PoseAIUtils:

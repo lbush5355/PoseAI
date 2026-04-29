@@ -55,11 +55,20 @@ PoseAI/
                           extract_ligand_code_candidates_from_mol2():
                           generates fallback candidate codes from a
                           mol2 substructure name (residue-number stripping).
+    runtime.py         -- Colab session bootstrap. setup_environment()
+                          installs pip deps, i386 libs, builds fpocket if
+                          missing, and downloads + ELF-validates engine
+                          binaries. Cell 1 of PoseAI.ipynb is a thin
+                          orchestration layer over this module.
     site_finder.py     -- PocketAnalyzer: fpocket wrapper, pocket barycenter
                           parsing, docking box parameters. Currently not the
                           active pocket detection code path.
     utils.py           -- PoseAIUtils: logging setup under poseai.* namespace,
-                          Drive/scratch sync, PATH verification
+                          Drive/scratch sync, PATH verification.
+                          download_and_verify_binary(): module-level
+                          function used by runtime.py to download an
+                          engine binary and reject anything that isn't a
+                          valid x86-64 ELF.
     visualizer.py      -- DockingVisualizer: py3Dmol rendering, engine-color-
                           coded poses, HTML export
   tests/
@@ -101,6 +110,16 @@ Development workflow:
   code is edited. Code is not considered stable until it passes batch
   validation in the Colab runtime.
 
+Notebook architecture:
+- Cells 1, 3, and 4 are thin orchestration drivers. The pipeline logic
+  they invoke lives in src/runtime.py (Stage 1 setup) and src/pipeline.py
+  (Stage 3-4 single-target run; created in Phase 3 of the streamlining
+  refactor, in progress). Cell 5 (batch validation) is intentionally an
+  exception — it is a test harness, not a v1.x release artifact, and may
+  inline batch-specific logic. To prevent single-target and batch flows
+  from drifting apart, both must call the same pipeline helpers under
+  the hood.
+
 Runtime paths (for context only):
 - /tmp/poseai_repo/                  -- fresh git clone, source of src/ modules
 - /content/fast_lane/src/            -- working copy of src/ modules (synced from clone)
@@ -122,21 +141,28 @@ Runtime paths (for context only):
 | preprocessor.py | ProteinLigandPrep,                 | Structure fetch, format conversion,         |
 |                 | get_ligand_centroid(),             | pocket center calculation                   |
 |                 | fetch_rcsb_smiles()                |                                             |
+| runtime.py      | setup_environment(),               | Cell 1 bootstrap: deps, fpocket, ELF-       |
+|                 | RuntimeContext                     | validated engine binaries                   |
 | site_finder.py  | PocketAnalyzer                     | fpocket wrapper (not active code path)      |
-| utils.py        | PoseAIUtils                        | Logging, sync, dependency verification      |
+| utils.py        | PoseAIUtils,                       | Logging, sync, dependency verification,     |
+|                 | download_and_verify_binary()       | x86-64 ELF download with validation         |
 | visualizer.py   | DockingVisualizer                  | 3D rendering, HTML export                   |
 
 ---
 
 ## Pipeline Execution Flow
 
-1. **Environment Setup** (PoseAI.ipynb)
-   - Mount Google Drive, sync src/ modules to Fast Lane scratch disk
-   - Install Python dependencies (rdkit, openbabel-wheel, py3Dmol, hdbscan)
-   - Build fpocket from source, download Linux x86_64 engine binaries
-     (smina, gnina, ledock, lepro) to fast_lane/bin/
-   - Verify all binaries are valid ELF files matching host architecture
-   - Runs once per Colab session only
+1. **Environment Setup** (PoseAI.ipynb Cell 1 + runtime.py)
+   - Cell 1 mounts Drive, clones the repo from GitHub into
+     /tmp/poseai_repo, copies src/* into /content/fast_lane/src, and
+     adds src/ to sys.path (these steps must stay inline because
+     runtime.py is itself part of the cloned src/).
+   - Cell 1 then calls runtime.setup_environment(), which installs pip
+     dependencies, installs i386 support libs, builds fpocket if
+     missing, and downloads each engine binary via
+     utils.download_and_verify_binary() — rejecting HTML error pages
+     and wrong-architecture binaries before they hit subprocess.Popen.
+   - Each step is idempotent; safe to re-run within a session.
 
 2. **Preprocessing** (preprocessor.py)
    - Fetch PDB from RCSB, strip waters, assign Gasteiger charges

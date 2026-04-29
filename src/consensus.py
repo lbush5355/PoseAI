@@ -477,6 +477,16 @@ class ConsensusAnalyzer:
                 f"Reference {path} failed strict sanitize ({e}); using as-loaded"
             )
 
+        # removeHs at load time is unreliable with sanitize=False; force-strip
+        # explicit Hs from RCSB ideal SDFs so atom counts stay heavy-only.
+        try:
+            mol = Chem.RemoveHs(mol)
+        except (ValueError, RuntimeError) as e:
+            logger.debug(f"RemoveHs failed for {path}: {e}; using as-loaded")
+
+        if mol is None or mol.GetNumAtoms() == 0:
+            return None
+
         return mol
 
     @staticmethod

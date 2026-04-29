@@ -467,13 +467,18 @@ def fetch_rcsb_smiles(ligand_code: str) -> Optional[str]:
     return None
 
 
-# Common buffers, ions, and crystallization additives — filtered out when
-# picking a drug-like ligand from an RCSB entry's non-polymer entities.
+# Common buffers, ions, crystallization additives, and standard amino acids
+# — filtered out when picking a drug-like ligand from an RCSB entry's
+# non-polymer entities. Amino acids appear as non-polymer entries in entries
+# whose actual inhibitor is a polymer chain (e.g. 1A30); without filtering
+# they get picked up as bogus 10-atom templates against the real ligand.
 _NON_DRUG_LIKE_CODES = {
     "HOH", "DOD", "NA", "K", "MG", "CA", "ZN", "FE", "MN", "NI", "CU", "CO",
     "CD", "HG", "PB", "CL", "BR", "F", "I", "SO4", "PO4", "NO3", "CO3",
     "ACT", "EDO", "GOL", "PEG", "PG4", "PG6", "MES", "TRS", "BME", "DMS",
     "DMF", "MOH", "EOH", "IMD", "FMT", "ACE", "CIT", "MPD", "EPE", "BCT",
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
 }
 
 

@@ -1,6 +1,6 @@
 # PoseAI: A Multi-Engine Consensus Molecular Docking Pipeline
 
-**Status: v0.9 pre-release** — The pipeline is fully functional end-to-end. The v1.x milestone requires a minimum of 6/8 gold-standard targets scoring Success or Acceptable, zero Error results, and functional unit test coverage. Current benchmark: 3/8 Success, 3/8 Poor, 2/8 Error (see [Benchmark Performance](#current-benchmark-performance)).
+**Status: v0.9 pre-release.** The pipeline is fully functional end-to-end. The v1.x milestone requires a minimum of 6/8 gold-standard targets scoring Success or Acceptable, zero Error results, and functional unit test coverage. Current benchmark: 3/8 Success, 3/8 Poor, 2/8 Error (see [Benchmark Performance](#current-benchmark-performance)).
 
 PoseAI is a modular computational framework designed to execute and harmonize ligand-binding simulations across multiple docking scoring functions. By integrating **Gnina** (Vina-family sampler with CNN rescoring), **LeDock** (simulated annealing / independent architecture), and **Smina** (Vina-family empirical force-field baseline), the pipeline collects the full pose output from all engines into a shared pool and applies HDBSCAN clustering on a pairwise heavy-atom RMSD matrix to identify binding modes where independently operating engines converge in 3D space. Cross-engine agreement is quantified as an **Ensemble Confidence Score** combining multi-engine representation (70%) and cluster population (30%).
 
@@ -14,7 +14,7 @@ Developed as a course project for CHEM 4640 at the University of Colorado Denver
 
 The pipeline is composed of distinct functional modules in the `src/` directory:
 
-*   **`runtime.py`**: Session bootstrap — installs dependencies, downloads and ELF-validates engine binaries, builds fpocket.
+*   **`runtime.py`**: Session bootstrap: installs dependencies, downloads and ELF-validates engine binaries, builds fpocket.
 *   **`preprocessor.py`**: Fetches structures from RCSB, strips solvent, isolates the ligand by residue code, and generates engine-ready PDBQT/mol2 files via Open Babel.
 *   **`docking.py`**: Runs Gnina, Smina, and LeDock in parallel via `ProcessPoolExecutor` with per-engine and pool-level timeouts.
 *   **`consensus.py`**: Standardizes pose topology across engines, computes the all-pairs heavy-atom RMSD matrix, clusters via HDBSCAN, and ranks clusters by engine count → size → intra-RMSD.
@@ -30,26 +30,26 @@ The pipeline is composed of distinct functional modules in the `src/` directory:
 The following directions advance PoseAI from a validated redocking pipeline toward a tool capable of genuine scientific contribution to structure-based drug discovery.
 
 **Scientific capabilities**
-- **De novo binding site discovery** — use fpocket (already built in Cell 1) to identify candidate pockets from receptor surface geometry, then select the most compatible pocket by matching ligand pharmacophoric features (HBD/HBA/hydrophobic/aromatic via RDKit `MolChemicalFeatures`) against pocket descriptors. `PocketAnalyzer` in `site_finder.py` implements the fpocket wrapper; the pharmacophore-to-pocket matching layer is the remaining work.
-- **Pharmacophore-aware confidence scoring** — add a pharmacophore satisfaction component to the Ensemble Confidence Score (HBD/HBA complementarity, hydrophobic burial) so the score reflects chemical compatibility, not only geometric convergence.
-- **CASF-2016 benchmarking** — validate against 285 protein-ligand complexes (the community standard for docking power / scoring power / ranking power) to make performance claims comparable to published methods.
-- **DiffDock engine integration** — replace Smina with DiffDock (end-to-end diffusion model, no explicit force field), yielding three genuinely orthogonal search paradigms: DiffDock (generative ML), Gnina (physics sampling + CNN rescoring), LeDock (stochastic annealing). `EnsembleManager` and `EngineType` are designed to accommodate this with minimal changes.
-- **Multi-residue ligand support** — targets with polymer-chain inhibitors (e.g., 1A30) return no results from RCSB's non-polymer entity endpoint; full support requires composing topology from PDB Chemical Component Dictionary residues.
-- **Receptor flexibility** — docking against conformational ensembles from MD snapshots or rotamer sampling for targets with known conformational variability.
+- **De novo binding site discovery:** use fpocket (already built in Cell 1) to identify candidate pockets from receptor surface geometry, then select the most compatible pocket by matching ligand pharmacophoric features (HBD/HBA/hydrophobic/aromatic via RDKit `MolChemicalFeatures`) against pocket descriptors. `PocketAnalyzer` in `site_finder.py` implements the fpocket wrapper; the pharmacophore-to-pocket matching layer is the remaining work.
+- **Pharmacophore-aware confidence scoring:** add a pharmacophore satisfaction component to the Ensemble Confidence Score (HBD/HBA complementarity, hydrophobic burial) so the score reflects chemical compatibility, not only geometric convergence.
+- **CASF-2016 benchmarking:** validate against 285 protein-ligand complexes (the community standard for docking power / scoring power / ranking power) to make performance claims comparable to published methods.
+- **DiffDock engine integration:** replace Smina with DiffDock (end-to-end diffusion model, no explicit force field), yielding three genuinely orthogonal search paradigms: DiffDock (generative ML), Gnina (physics sampling + CNN rescoring), LeDock (stochastic annealing). `EnsembleManager` and `EngineType` are designed to accommodate this with minimal changes.
+- **Multi-residue ligand support:** targets with polymer-chain inhibitors (e.g., 1A30) return no results from RCSB's non-polymer entity endpoint; full support requires composing topology from PDB Chemical Component Dictionary residues.
+- **Receptor flexibility:** docking against conformational ensembles from MD snapshots or rotamer sampling for targets with known conformational variability.
 
 **Technical fixes**
-- **RMSD recovery for topology-incompatible ligands** — for 1HSG and 1IEP, `AssignBondOrdersFromTemplate` fails in both directions. Planned fix: MCS-based coordinate-copy overlay between the crystal mol2 and ideal SDF, then RMSD against the reconciled reference.
+- **RMSD recovery for topology-incompatible ligands:** for 1HSG and 1IEP, `AssignBondOrdersFromTemplate` fails in both directions. Planned fix: MCS-based coordinate-copy overlay between the crystal mol2 and ideal SDF, then RMSD against the reconciled reference.
 
 **Engineering**
-- **Functional test coverage** — no test suite currently exists. Priority targets: `_summarize_clusters()` deterministic sort, `_load_dok()` multi-pose recovery, `analyze_ensemble()` Class C retry trigger, and `_grade_rmsd()` boundary conditions — all mockable without running docking engines.
-- **Pipeline checkpointing** — save intermediate results after preprocessing, docking, and clustering so a crash does not discard all work for a target.
-- **`max_engines_for_consensus` config parameter** — the confidence score denominator is hardcoded to 3.0; adding a fourth engine without updating source silently caps its contribution.
+- **Functional test coverage:** no test suite currently exists. Priority targets: `_summarize_clusters()` deterministic sort, `_load_dok()` multi-pose recovery, `analyze_ensemble()` Class C retry trigger, and `_grade_rmsd()` boundary conditions (all mockable without running docking engines).
+- **Pipeline checkpointing:** save intermediate results after preprocessing, docking, and clustering so a crash does not discard all work for a target.
+- **`max_engines_for_consensus` config parameter:** the confidence score denominator is hardcoded to 3.0; adding a fourth engine without updating source silently caps its contribution.
 
 ### Path to Publication
 
 PoseAI makes two specific methodological claims that are testable against published literature on a community-standard benchmark.
 
-**Core claim.** Score-agnostic density-based consensus — HDBSCAN on a full all-pairs heavy-atom RMSD matrix with engine-count-primary cluster ranking — identifies near-native binding modes more reliably than fixed-threshold clustering with score-based selection. The existing implementation embodies this claim on 8 targets; the question is whether it holds at the scale needed for a peer-reviewed result.
+**Core claim.** Score-agnostic density-based consensus (HDBSCAN on a full all-pairs heavy-atom RMSD matrix with engine-count-primary cluster ranking) identifies near-native binding modes more reliably than fixed-threshold clustering with score-based selection. The existing implementation embodies this claim on 8 targets; the question is whether it holds at the scale needed for a peer-reviewed result.
 
 **Experiment 1: clustering method.** Run the same engine pool (Gnina + LeDock + Smina) on CASF-2016 (285 protein-ligand complexes) under two conditions: HDBSCAN with adaptive density detection, and a fixed 2.0 Å RMSD cutoff applied to the same pose pool. Success rate and mean RMSD across all 285 targets isolates the contribution of the clustering algorithm from all other pipeline choices.
 
@@ -73,9 +73,9 @@ The following problems required non-trivial root-cause diagnosis and drove signi
 
 **Topology standardization failure for peptidomimetic ligands (Class C retry).** For targets with flexible or peptidomimetic inhibitors (1HSG, 1IEP, 1HXW), Open Babel's perception of the crystal mol2 bond orders conflicts with how docking engines perceive the same ligand. This caused `AssignBondOrdersFromTemplate` to fail for 100% of poses, leaving the entire ensemble unstandardized. The resolution was a two-stage automatic retry: if the crystal mol2 master template causes a bond-order failure rate above 50%, the pipeline swaps the template to the RCSB ideal SDF and re-runs standardization in memory in roughly 2 seconds without re-docking. Post-retry failure rates dropped from 100% to 0–7% for all three affected targets.
 
-**Non-deterministic cluster selection** (1OWE: 0.23 Å vs. 8.86 Å across runs). When two clusters had equal pose counts, sorting by size alone left the tiebreaker undefined, causing the correct near-native cluster and a decoy cluster to alternate as the top-ranked result between runs. Fixed by a deterministic three-key sort — engine count descending, cluster size descending, intra-cluster RMSD ascending — which is chemically motivated without peeking at the crystal structure.
+**Non-deterministic cluster selection** (1OWE: 0.23 Å vs. 8.86 Å across runs). When two clusters had equal pose counts, sorting by size alone left the tiebreaker undefined, causing the correct near-native cluster and a decoy cluster to alternate as the top-ranked result between runs. Fixed by a deterministic three-key sort (engine count descending, cluster size descending, intra-cluster RMSD ascending) that is chemically motivated without peeking at the crystal structure.
 
-**Binary validation: HTML error pages as executables.** Downloaded engine binaries were passed directly to `subprocess.Popen` without format verification. When a download URL returned an HTML error page or a partial file, the resulting "binary" crashed at process launch with `[Errno 8] Exec format error` — a symptom that gave no indication of the actual cause. The fix reads the ELF magic bytes (`\x7fELF`) and `e_machine` field (`0x3E` for x86-64) immediately after each download and deletes the file and raises on any mismatch, so a bad download is caught before it can silently poison a session.
+**Binary validation: HTML error pages as executables.** Downloaded engine binaries were passed directly to `subprocess.Popen` without format verification. When a download URL returned an HTML error page or a partial file, the resulting "binary" crashed at process launch with `[Errno 8] Exec format error`, a symptom that gave no indication of the actual cause. The fix reads the ELF magic bytes (`\x7fELF`) and `e_machine` field (`0x3E` for x86-64) immediately after each download and deletes the file and raises on any mismatch, so a bad download is caught before it can silently poison a session.
 
 **RCSB SMILES fetch returning None for all ligands.** The RCSB Chemical Component Dictionary API returns a JSON dict with uppercase keys (`SMILES_stereo`, `SMILES`). The original fetch code queried lowercase key names, so the lookup always returned `None` even for well-characterized ligands like imatinib (STI), forcing the pipeline to fall through to 3D inference as the master template source. Once identified, the fix was a one-line key correction, but diagnosing it required tracing the template resolution fallback chain to its origin.
 
@@ -96,7 +96,7 @@ The following problems required non-trivial root-cause diagnosis and drove signi
 | 1HSG   | Error   | —           | Clustering succeeded; RMSD blocked by topology mismatch |
 | 1IEP   | Error   | —           | Clustering succeeded; RMSD blocked by topology mismatch |
 
-**Summary**: 3/8 Success, 3/8 Poor, 2/8 Error. Class C auto-retry (crystal mol2 → ideal SDF fallback) triggered for 1HSG, 1HXW, and 1IEP; post-retry bond-order failure rate dropped from 100% to 0–7% for all three. The 2 Error results are isolated to the RMSD validation step — docking and consensus clustering succeeded for all 8 targets. For 1HSG and 1IEP, the generated HTML overlay is the recommended manual validation path until the MCS-based coordinate-copy fallback is implemented (see roadmap).
+**Summary**: 3/8 Success, 3/8 Poor, 2/8 Error. Class C auto-retry (crystal mol2 → ideal SDF fallback) triggered for 1HSG, 1HXW, and 1IEP; post-retry bond-order failure rate dropped from 100% to 0–7% for all three. The 2 Error results are isolated to the RMSD validation step; docking and consensus clustering succeeded for all 8 targets. For 1HSG and 1IEP, the generated HTML overlay is the recommended manual validation path until the MCS-based coordinate-copy fallback is implemented (see roadmap).
 
 **v1.x release criteria**: Minimum 6/8 targets scoring Success or Acceptable, zero NaN/Error results, all critical known issues resolved, and functional test coverage in `tests/`.
 
@@ -144,7 +144,7 @@ To ensure complete reproducibility of the pipeline and batch validation results,
 
 ### 1. Runtime Environment
 
-PoseAI is designed exclusively for **Google Colab** with a **GPU runtime**. An NVIDIA A100 is recommended to reproduce published benchmark times; a T4 will work but Gnina's CNN-scoring path will be slower. The docking engine binaries are Linux x86-64 ELF files and cannot run on macOS or Windows. All Python source modules are cloned automatically from GitHub at session start — no manual file uploads are required.
+PoseAI is designed exclusively for **Google Colab** with a **GPU runtime**. An NVIDIA A100 is recommended to reproduce published benchmark times; a T4 will work but Gnina's CNN-scoring path will be slower. The docking engine binaries are Linux x86-64 ELF files and cannot run on macOS or Windows. All Python source modules are cloned automatically from GitHub at session start, with no manual file uploads required.
 
 1. Open `PoseAI.ipynb` in Google Colab.
 2. Go to **Runtime > Change runtime type** and select a **GPU** hardware accelerator (required for Gnina's CNN-scoring path).
@@ -185,15 +185,15 @@ The full set of gold-standard targets is: `1ett`, `1owe`, `1a30`, `1stp`, `1hxw`
 *   Mounts your Google Drive to access the `PoseAI` directory.
 *   Clones the `PoseAI` repository from GitHub and copies `src/*.py` into the Colab session.
 *   Installs required Python libraries (`rdkit`, `py3Dmol`, `hdbscan`, etc.).
-*   Adds 32-bit (`i386`) architecture support to the Colab Ubuntu instance — required because the LeDock and lepro binaries are 32-bit legacy ELFs.
+*   Adds 32-bit (`i386`) architecture support to the Colab Ubuntu instance (the LeDock and lepro binaries are 32-bit legacy ELFs).
 *   Downloads Smina, Gnina, LeDock, lepro, and fpocket; validates each download as a well-formed x86-64 ELF before allowing it to be invoked.
 
 ### 5. Validation Protocol
 
 **Step 5: Local Dataset Batch Validation** benchmarks the pipeline against all targets in `dataset/`. For each target it runs ensemble docking, consensus clustering, and RMSD grading, then outputs:
 
-*   `batch_summary.csv` — per-target status and RMSD for this run
-*   `run_history.csv` — cumulative per-target statistics across all sessions (success rate, best RMSD)
+*   `batch_summary.csv`: per-target status and RMSD for this run
+*   `run_history.csv`: cumulative per-target statistics across all sessions (success rate, best RMSD)
 *   3D `.html` visualization files in `batch_results/<TARGET>/`
 
 Per-target aggregate statistics (success rate, pass rate, best RMSD) are also displayed inline at the end of Step 5 without leaving the notebook.
@@ -210,15 +210,15 @@ Consensus docking approaches fall into two paradigms in the literature.
 
 **Pose-based spatial consensus** methods compare actual 3D pose coordinates across engines. dockECR includes an RMSD-Based Scoring component that computes pairwise RMSD between each engine's single best pose, using spatial agreement as a secondary confidence signal. **MetaDOCK** (Ramírez & Caballero, 2023) is the most direct precedent for PoseAI's approach: it pools the top-5 poses per engine into a shared set (15 total), applies fixed 2.5 Å RMSD-threshold grouping to the joint pool, and selects the best-scored pose from the largest cluster. **VoteDock** (Plewczynski et al., 2011) similarly pooled poses from seven engines and applied hierarchical clustering, predating density-based methods.
 
-PoseAI extends this direction in two specific respects. First, it applies HDBSCAN to the full all-pairs heavy-atom RMSD matrix across the entire cross-engine pose pool — a density-based algorithm that adapts to the natural cluster structure of the pose distribution without requiring a predetermined distance cutoff or cluster count. MDSCAN (Ferruz et al., 2022) is the only prior work applying HDBSCAN to an RMSD distance matrix in structural biology, in the context of molecular dynamics trajectory clustering rather than docking. Second, PoseAI ranks clusters by the **number of contributing engines** as the primary selection criterion rather than by pose score. This makes the selection explicitly score-agnostic: the consensus binding mode is defined by where independently operating engines converge in 3D space, not by what any individual scoring function assigns.
+PoseAI extends this direction in two specific respects. First, it applies HDBSCAN to the full all-pairs heavy-atom RMSD matrix across the entire cross-engine pose pool, a density-based algorithm that adapts to the natural cluster structure of the pose distribution without requiring a predetermined distance cutoff or cluster count. MDSCAN (Ferruz et al., 2022) is the only prior work applying HDBSCAN to an RMSD distance matrix in structural biology, in the context of molecular dynamics trajectory clustering rather than docking. Second, PoseAI ranks clusters by the **number of contributing engines** as the primary selection criterion rather than by pose score. This makes the selection explicitly score-agnostic: the consensus binding mode is defined by where independently operating engines converge in 3D space, not by what any individual scoring function assigns.
 
-On engine diversity, **ESSENCE-Dock** (Sánchez-Murcia et al., 2024) makes the strongest published argument for combining algorithmically distinct engines, pairing DiffDock (end-to-end diffusion model), Gnina (CNN-augmented Vina sampler), and LeadFinder (genetic algorithm). The current PoseAI engine set — Gnina and Smina (both Vina-family) plus LeDock (simulated annealing) — provides partial architectural diversity. Replacing Smina with DiffDock is a targeted roadmap item to achieve three fully orthogonal search paradigms and strengthen the core independence assumption that underlies the spatial consensus approach.
+On engine diversity, **ESSENCE-Dock** (Sánchez-Murcia et al., 2024) makes the strongest published argument for combining algorithmically distinct engines, pairing DiffDock (end-to-end diffusion model), Gnina (CNN-augmented Vina sampler), and LeadFinder (genetic algorithm). The current PoseAI engine set (Gnina and Smina, both Vina-family, plus LeDock with simulated annealing) provides partial architectural diversity. Replacing Smina with DiffDock is a targeted roadmap item to achieve three fully orthogonal search paradigms and strengthen the core independence assumption that underlies the spatial consensus approach.
 
 ---
 
 ## Development Notes
 
-The pipeline runs exclusively on **Google Colab** (Linux x86-64). Local setup via `pip install -r requirements.txt` supports editing and linting only — functional testing requires a Colab session with GPU runtime.
+The pipeline runs exclusively on **Google Colab** (Linux x86-64). Local setup via `pip install -r requirements.txt` supports editing and linting only; functional testing requires a Colab session with GPU runtime.
 
 **Commit conventions:** `feat:` / `fix:` / `docs:` / `test:` / `refactor:` prefixes. Stage specific files rather than `git add -A`.
 

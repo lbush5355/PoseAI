@@ -8,10 +8,10 @@ a consensus clustering strategy via HDBSCAN to identify the most probable
 binding poses. Confidence is quantified via an Ensemble Confidence Score
 based on spatial agreement and multi-engine representation.
 
-Production readiness (v1.x) is defined as: the pipeline successfully
-processes multiple gold standard PDB/ligand pairs and identifies the
-correct consensus binding mode for each, validated against the crystal
-structure via heavy-atom RMSD.
+Current version: v0.9 pre-release. Production readiness (v1.x) is
+defined as: the pipeline successfully processes multiple gold standard
+PDB/ligand pairs and identifies the correct consensus binding mode for
+each, validated against the crystal structure via heavy-atom RMSD.
 
 ---
 

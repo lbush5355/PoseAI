@@ -29,9 +29,18 @@ PoseAI/
                           pairwise RMSD matrix, HDBSCAN clustering,
                           confidence scoring. Master template resolved
                           via _resolve_master_template() in priority
-                          order: topology_template_path (ideal SDF) >
-                          reference_ligand_path (crystal mol2/sdf/pdb) >
-                          SMILES > stereo-stripped retry > 3D-inferred.
+                          order: reference_ligand_path (crystal mol2/
+                          sdf/pdb) > SMILES > stereo-stripped retry >
+                          3D-inferred. If the crystal mol2 causes a
+                          bond-order fail rate above
+                          cfg.bond_order_fallback_threshold (default
+                          0.5), analyze_ensemble() swaps master_ref to
+                          fallback_topology_path (ideal SDF) and re-runs
+                          standardization in-memory without re-docking.
+                          _load_and_standardize() returns a 3-tuple
+                          (poses, metadata, fail_rate). Cluster ranking
+                          is deterministic: sort by Num_Engines DESC,
+                          Size DESC, intra-RMSD ASC.
                           calculate_native_rmsd(): standalone function,
                           strict in-place heavy-atom RMSD between predicted
                           pose and crystal structure (no alignment).
@@ -69,6 +78,23 @@ PoseAI/
                           function used by runtime.py to download an
                           engine binary and reject anything that isn't a
                           valid x86-64 ELF.
+    pipeline.py        -- run_from_rcsb(): single-target entry point
+                          (RCSB fetch + ProteinLigandPrep). run_from_local():
+                          batch entry point (PDBbind-layout folder, obabel
+                          PDBQT generation). Both delegate to _run_pipeline()
+                          which owns docking → consensus → RMSD. Returns
+                          TargetResult (status, native_rmsd, confidence,
+                          cluster_df, analyzer, docking_results,
+                          error_message).
+    run_history.py     -- append_run(): appends one TargetResult row to
+                          run_history.csv on Drive (run_id, timestamp,
+                          target_id, status, native_rmsd, confidence,
+                          cluster_size, num_engines, error_message,
+                          exhaustiveness, poses_per_engine). Called by
+                          Cell 5 after each target. per_target_stats():
+                          aggregates per-target Success_Rate, Pass_Rate,
+                          Mean_RMSD_Success, Best_RMSD across all recorded
+                          runs; displayed at end of Cell 5 for presentation.
     visualizer.py      -- DockingVisualizer: py3Dmol rendering, engine-color-
                           coded poses, HTML export
   tests/
@@ -138,9 +164,12 @@ Runtime paths (for context only):
 | consensus.py    | ConsensusAnalyzer,                 | Pose clustering, confidence scoring,        |
 |                 | calculate_native_rmsd()            | crystal structure validation                |
 | docking.py      | EnsembleManager, HardwareProfile   | Parallel engine dispatch, timeout safety    |
+| pipeline.py     | run_from_rcsb(), run_from_local(), | End-to-end orchestration; single-target     |
+|                 | PipelineParams, TargetResult       | and batch entry points                      |
 | preprocessor.py | ProteinLigandPrep,                 | Structure fetch, format conversion,         |
 |                 | get_ligand_centroid(),             | pocket center calculation                   |
 |                 | fetch_rcsb_smiles()                |                                             |
+| run_history.py  | append_run(), per_target_stats()   | Persistent per-target run statistics CSV    |
 | runtime.py      | setup_environment(),               | Cell 1 bootstrap: deps, fpocket, ELF-       |
 |                 | RuntimeContext                     | validated engine binaries                   |
 | site_finder.py  | PocketAnalyzer                     | fpocket wrapper (not active code path)      |
@@ -191,28 +220,29 @@ Runtime paths (for context only):
 5. **Consensus Clustering** (consensus.py)
    - Load poses from all successful engines
    - Resolve master template via _resolve_master_template():
-     1. Ideal SDF at topology_template_path (canonical RCSB chemistry)
-     2. Crystal mol2/sdf/pdb at reference_ligand_path
-     3. User/RCSB SMILES, with stereo-stripped retry on failure
-     4. SMILES inferred from a successful docking output (last resort)
+     1. Crystal mol2/sdf/pdb at reference_ligand_path (primary)
+     2. User/RCSB SMILES, with stereo-stripped retry on failure
+     3. SMILES inferred from a successful docking output (last resort)
    - Standardize topology against the master template
+   - If bond-order fail rate > cfg.bond_order_fallback_threshold (0.5),
+     swap master_ref to fallback_topology_path (ideal SDF) and re-run
+     standardization in-memory — no re-docking required (~2 s)
    - Compute pairwise heavy-atom RMSD matrix (O(n^2)); parallelized
      above cfg.rmsd_parallel_threshold
    - Cluster via HDBSCAN, identify multi-engine consensus clusters
+   - Rank clusters: Num_Engines DESC, Size DESC, intra-RMSD ASC
    - Score confidence based on engine agreement and cluster size
 
-6. **Validation** (consensus.py)
-   - Single-target run (Cell 4 of PoseAI.ipynb): call
-     calculate_native_rmsd() with explicit reference_smiles to compute
-     strict in-place heavy-atom RMSD against the crystal mol2.
-   - Batch validation (Cell 5 of PoseAI.ipynb): build ref_mol via
-     AssignBondOrdersFromTemplate(analyzer.master_ref, native_mol).
-     This combines crystal positions (from native_mol) with the
-     master template's canonical bond perception (from ideal SDF when
-     available, else crystal mol2). Both ref_mol and the predicted
-     poses end up with isomorphic graphs, ensuring rdMolAlign.CalcRMS
-     succeeds without topology-mismatch artifacts.
-   - No alignment applied in either path; comparison is in-place.
+6. **Validation** (pipeline.py + consensus.py)
+   - Handled inside pipeline._run_pipeline() via _compute_native_rmsd().
+   - Builds ref_mol via AssignBondOrdersFromTemplate(analyzer.master_ref,
+     native_mol), combining crystal coordinates with the canonical bond
+     perception from whichever master template was selected.
+   - Post-clustering block is wrapped in try/except so valence errors
+     from engine-output poses (e.g., over-valent N) set Status=Error
+     and populate TargetResult.error_message rather than crashing the
+     caller; cluster_df and analyzer are preserved for inspection.
+   - No alignment applied; comparison is strict in-place heavy-atom RMSD.
    - Grading scale:
      - < 2.0 angstroms: Success (near-native pose)
      - 2.0 - 3.0 angstroms: Acceptable
@@ -223,11 +253,15 @@ Runtime paths (for context only):
    - Engine-specific color coding for pose origin
    - HTML export for sharing results outside Colab
 
-8. **Batch Validation** (PoseAI.ipynb)
+8. **Batch Validation** (PoseAI.ipynb Cell 5 + pipeline.py)
    - Environment setup (Stage 1) runs once per session only
-   - Stages 2-7 repeat for each PDB/ligand pair in the batch
-   - Aggregates RMSD grades (Success/Acceptable/Poor) across targets
-   - Results persisted to Drive before session ends
+   - Cell 5 calls pipeline.run_from_local() per target and calls
+     run_history.append_run() after each result, writing one row to
+     run_history.csv on Drive for cross-session tracking
+   - Displays per_target_stats() (Success_Rate, Pass_Rate, Best_RMSD)
+     after the batch table so cumulative performance is visible without
+     leaving the notebook
+   - Results and HTML overlays persisted to batch_results/ on Drive
    - Pipeline is milestone-ready when majority of gold standard
      targets score Success or Acceptable with zero NaN results
 
@@ -265,16 +299,13 @@ Runtime paths (for context only):
 
 ### Low
 
-5. **RMSD matrix is O(n^2) with no parallelization**
-   - Acceptable for current batch sizes but will bottleneck at scale
-
-6. **Active pocket detection method is not the documented one**
+5. **Active pocket detection method is not the documented one**
    - get_ligand_centroid() in preprocessor.py is active
    - PocketAnalyzer (fpocket) in site_finder.py is documented but
      not currently called
    - Preferred method should be made explicit in config
 
-7. **No checkpointing**
+6. **No checkpointing**
    - Pipeline crash at any stage loses all work for that target
    - Intermediate results should be saved after each stage
 
@@ -358,6 +389,38 @@ Runtime paths (for context only):
   log line is at WARNING level for diagnostic visibility in Colab.
 - fpocket coordinate regex: robust scientific notation pattern sourced
   from config
+- Phase 3 regression (ideal SDF primary template): the original ideal-SDF
+  integration passed topology_template_path as the highest-priority
+  template, causing 100% AssignBondOrdersFromTemplate failures on simple
+  ligands (biotin, streptavidin, etc.) whose obabel-perceived mol2 differs
+  from RCSB canonical chemistry. Fixed by defaulting to crystal mol2 as
+  primary (reference_ligand_path) and demoting the ideal SDF to
+  fallback_topology_path, activated only when fail rate exceeds
+  cfg.bond_order_fallback_threshold (0.5). Rename also updated in
+  ConsensusAnalyzer.__init__ and _run_pipeline().
+- Cluster ranking instability: clusters with equal size were sorted by
+  size alone, causing non-deterministic best-cluster selection between
+  runs when two clusters tied on pose count (1OWE: 0.23 Å ↔ 8.86 Å
+  flip). Fixed by multi-key sort: Num_Engines DESC, Size DESC,
+  intra-RMSD ASC in _summarize_clusters().
+- Post-clustering valence crash (1HXW): Chem.RemoveHs() on an engine
+  output pose raised ValueError ("Explicit valence for atom N, 4")
+  and escaped run_from_local(), discarding the cluster_df and analyzer
+  that would have been useful for inspection. Wrapped the entire
+  post-clustering block in try/except Exception; failures now return
+  TargetResult(status="Error", error_message=f"{type(e).__name__}: {e}")
+  with cluster_df and analyzer preserved.
+- TargetResult.error_message: added str field (default "") that captures
+  the exception type and message on Status=Error, surfacing failures in
+  run_history.csv without requiring log inspection.
+- Auto-retry with ideal SDF (Class C): analyze_ensemble() unpacks a
+  3-tuple (poses, metadata, fail_rate) from _load_and_standardize(). If
+  fail_rate > cfg.bond_order_fallback_threshold and fallback_topology_path
+  is set, master_ref is swapped to the ideal SDF and standardization is
+  re-run in-memory (~2 s, no re-docking). Both the trigger and outcome
+  are logged at WARNING level for auditability.
+- bond_order_fallback_threshold: new ConsensusConfig field (default 0.5)
+  replacing the inline 0.5 literal; governs the Class C retry trigger.
 
 ---
 
@@ -482,15 +545,18 @@ dataset/
 - > 3.0 angstroms RMSD: Poor (pipeline failed on this target)
 - NaN: Pipeline error (crash, failed docking, or clustering failure)
 
-### Current Benchmark (last recorded run, 2026-04-28)
+### Current Benchmark (last recorded run, 2026-04-29)
 
-- Success:    4/8 (1FJS 1.19 Å, 1STP 0.62 Å, 1OWE 0.23 Å, 1ETT 0.67 Å)
-- Poor:       2/8 (1HXW 4.24 Å, 1A30 7.78 Å)
-- NaN:        2/8 (1HSG, 1IEP — bond-perception mismatch; ideal-SDF
-              fix shipped in commit 9e10d35 but not yet validated)
-- Run was at POSES_PER_ENGINE=20 and EXHAUSTIVENESS=8 (faster batch
-  defaults). 1ETT recovered from Poor (4.00 → 0.67) after the ideal-SDF
-  topology change, suggesting other Poor targets may also benefit.
+- Success:    3/8 (1FJS 1.62 Å, 1STP 0.62 Å, 1OWE 0.23 Å)
+- Poor:       3/8 (1HXW, 1A30, 1ETT regressed after Phase 3 refactor)
+- Error:      2/8 (1HSG, 1IEP — awaiting validation of ideal-SDF
+              auto-retry fix shipped in commit 67b736a)
+- Run was at POSES_PER_ENGINE=20 and EXHAUSTIVENESS=8. The Phase 3
+  refactor introduced a regression that dropped 4/8 → 3/8; root cause
+  was consensus.py receiving the ideal SDF as the primary (not fallback)
+  template, causing 100% bond-order assignment failures on simple
+  ligands. Fix (crystal mol2 primary, ideal SDF on-demand retry) shipped
+  in commits 7014fb9, 7522905, 67b736a but is not yet validated in Colab.
 
 ### Known Limitation: Multi-Residue Ligands
 

@@ -222,29 +222,17 @@ def _run_pipeline(
         engines=params.engines,
     )
 
-    # Master template policy: prefer the deposited crystal mol2 over the
-    # RCSB ideal SDF. The crystal mol2 is the experimental ground truth
-    # — its bond perception is what depositor refinement validated, and
-    # it matches obabel-perceived engine outputs more reliably for
-    # non-peptidomimetic ligands. The ideal SDF was added (commit
-    # 8144269) to recover peptidomimetics like 1HSG/MK1 and 1IEP/STI
-    # where crystal mol2 perception fails, but in batch validation it
-    # caused 100% AssignBondOrdersFromTemplate failures on simple
-    # ligands (1FJS, 1STP, 1OWE, 1ETT) by introducing a canonical-vs-
-    # depositor topology mismatch with engine outputs. Default to the
-    # crystal mol2 here; ideal_sdf_path is still resolved upstream so
-    # callers can opt back in per-target if needed (not yet wired).
+    # Crystal mol2 is the primary master template; ideal SDF is the automatic
+    # fallback if the crystal mol2 causes >50% bond-order assignment failure
+    # (see ConsensusAnalyzer.analyze_ensemble and cfg.bond_order_fallback_threshold).
     if ideal_sdf_path:
-        logger.info(
-            f"Ideal SDF resolved at {ideal_sdf_path} but not used as "
-            f"master template (default policy: crystal mol2 takes priority)"
-        )
+        logger.info(f"Ideal SDF available as fallback template: {ideal_sdf_path}")
     analyzer = ConsensusAnalyzer(
         work_dir=work_dir,
         rmsd_threshold=params.rmsd_threshold,
         ligand_smiles=ligand_smiles,
         reference_ligand_path=ligand_mol2,
-        topology_template_path=None,
+        fallback_topology_path=ideal_sdf_path,
     )
     cluster_df = analyzer.analyze_ensemble(docking_results)
 

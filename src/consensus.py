@@ -117,7 +117,7 @@ class ConsensusAnalyzer:
         rmsd_threshold: Optional[float] = None,
         ligand_smiles: Optional[str] = None,
         reference_ligand_path: Optional[str] = None,
-        topology_template_path: Optional[str] = None,
+        fallback_topology_path: Optional[str] = None,
     ) -> None:
         self.work_dir = work_dir
         self.rmsd_threshold = (
@@ -128,7 +128,7 @@ class ConsensusAnalyzer:
 
         self.ligand_smiles = ligand_smiles
         self.reference_ligand_path = reference_ligand_path
-        self.topology_template_path = topology_template_path
+        self.fallback_topology_path = fallback_topology_path
         self.master_ref: Optional[Chem.Mol] = None
 
         self.all_poses: List[Chem.Mol] = []
@@ -364,14 +364,17 @@ class ConsensusAnalyzer:
         """Build the master topology template, trying sources in priority order.
 
         Priority:
-          1. Ideal SDF at topology_template_path. Canonical RCSB-curated
-             chemistry; preferred because its bond perception is
-             RDKit-friendly and matches engine outputs more reliably than
-             depositor mol2 perception (especially for peptidomimetic
-             ligands with quaternary nitrogens / fused aromatics).
-          2. Crystal-structure ligand at reference_ligand_path. Falls back
-             when no ideal SDF is provided or the fetch failed (custom
-             ligand not in RCSB CCD).
+          1. Crystal-structure ligand at reference_ligand_path. The deposited
+             experimental structure whose bond perception was validated during
+             crystallographic refinement. Tried first because it matches
+             obabel-perceived engine outputs more reliably for non-peptidomimetic
+             ligands. If the file fails to load, falls through to (2).
+          2. fallback_topology_path (RCSB ideal SDF). Canonical chemistry-only
+             template. Only reached here when the crystal mol2 cannot be parsed
+             at all — the more common case where crystal mol2 loads but its bond
+             perception mismatches engine outputs is handled by the retry in
+             analyze_ensemble (after _load_and_standardize reports a high fail
+             rate), not here.
           3. User-provided or RCSB-fetched SMILES via self.ligand_smiles.
           4. Stereo-stripped retry of (3).
           5. SMILES inferred from a successful docking output (last resort).
@@ -381,21 +384,7 @@ class ConsensusAnalyzer:
         ValueError
             If all sources fail to produce a parseable, non-empty Mol.
         """
-        # 1. Ideal SDF (preferred: canonical chemistry, RDKit-friendly)
-        if self.topology_template_path:
-            mol = self._try_load_reference(self.topology_template_path)
-            if mol is not None:
-                logger.warning(
-                    f"Master template ← ideal SDF "
-                    f"({mol.GetNumAtoms()} heavy atoms): {self.topology_template_path}"
-                )
-                return mol
-            logger.warning(
-                f"Ideal SDF unparseable: {self.topology_template_path}; "
-                "falling back to crystal reference"
-            )
-
-        # 2. Crystal-structure reference
+        # 1. Crystal-structure reference (primary)
         if self.reference_ligand_path:
             mol = self._try_load_reference(self.reference_ligand_path)
             if mol is not None:
@@ -406,6 +395,22 @@ class ConsensusAnalyzer:
                 return mol
             logger.warning(
                 f"Crystal reference unparseable: {self.reference_ligand_path}; "
+                "falling back to ideal SDF"
+            )
+
+        # 2. Ideal SDF — only when crystal mol2 fails to load entirely.
+        # When crystal mol2 loads but causes high bond-order failure rates,
+        # analyze_ensemble handles the swap after _load_and_standardize.
+        if self.fallback_topology_path:
+            mol = self._try_load_reference(self.fallback_topology_path)
+            if mol is not None:
+                logger.warning(
+                    f"Master template ← ideal SDF (crystal mol2 unloadable) "
+                    f"({mol.GetNumAtoms()} heavy atoms): {self.fallback_topology_path}"
+                )
+                return mol
+            logger.warning(
+                f"Ideal SDF also unparseable: {self.fallback_topology_path}; "
                 "falling back to SMILES path"
             )
 
@@ -434,9 +439,9 @@ class ConsensusAnalyzer:
                 return mol
 
         raise ValueError(
-            "Could not build master template: ideal SDF, crystal reference, "
+            "Could not build master template: crystal reference, ideal SDF, "
             "SMILES, and 3D inference all failed. Provide either a "
-            "topology_template_path, reference_ligand_path, or valid ligand_smiles."
+            "reference_ligand_path, fallback_topology_path, or valid ligand_smiles."
         )
 
     @staticmethod
@@ -553,13 +558,48 @@ class ConsensusAnalyzer:
             f"Processing {len(successful)} successful / {len(docking_results)} total runs"
         )
 
-        # Build master template from the most rigorous available source
-        # (crystal mol2 → SMILES → stereo-stripped → 3D inference)
+        # Build master template — crystal mol2 first (see _resolve_master_template).
         self.master_ref = self._resolve_master_template(successful)
-        
-        # Load and standardize topologies
-        processed_poses, metadata = self._load_and_standardize(successful)
-        
+
+        # Load and standardize topologies against the master template.
+        processed_poses, metadata, fail_rate = self._load_and_standardize(successful)
+
+        # If the crystal mol2 template caused a high bond-order failure rate
+        # (peptidomimetic ligands whose depositor perception conflicts with
+        # engine output perception) AND an ideal SDF fallback is available,
+        # swap the master template and re-run standardization. Docking results
+        # are already in memory — only the consensus analysis step (~2s) repeats.
+        cfg = get_config().consensus
+        if (
+            fail_rate > cfg.bond_order_fallback_threshold
+            and self.fallback_topology_path
+        ):
+            fallback_mol = self._try_load_reference(self.fallback_topology_path)
+            if fallback_mol is not None:
+                logger.warning(
+                    f"Bond order fail rate {fail_rate:.0%} exceeds threshold "
+                    f"({cfg.bond_order_fallback_threshold:.0%}); retrying "
+                    f"standardization with ideal SDF fallback: "
+                    f"{self.fallback_topology_path}"
+                )
+                self.master_ref = fallback_mol
+                processed_poses, metadata, fail_rate = self._load_and_standardize(
+                    successful
+                )
+                logger.warning(
+                    f"Master template ← ideal SDF (fallback after crystal mol2 "
+                    f"fail rate exceeded threshold) "
+                    f"({fallback_mol.GetNumAtoms()} heavy atoms): "
+                    f"{self.fallback_topology_path}  "
+                    f"Post-retry fail rate: {fail_rate:.0%}"
+                )
+            else:
+                logger.warning(
+                    f"Ideal SDF fallback unavailable or unparseable "
+                    f"({self.fallback_topology_path}); proceeding with "
+                    f"crystal mol2 input topology despite {fail_rate:.0%} fail rate"
+                )
+
         n = len(processed_poses)
         if n < 2:
             logger.warning(f"Fewer than 2 poses ({n}); skipping clustering")
@@ -583,7 +623,7 @@ class ConsensusAnalyzer:
 
     def _load_and_standardize(
         self, successful_results: List[DockingResult]
-    ) -> Tuple[List[Chem.Mol], List[Dict]]:
+    ) -> Tuple[List[Chem.Mol], List[Dict], float]:
         """Load and standardize topologies across engines.
 
         Per-pose bond-order failures are aggregated into a single summary
@@ -594,8 +634,11 @@ class ConsensusAnalyzer:
 
         Returns
         -------
-        Tuple[List[Chem.Mol], List[Dict]]
-            Processed molecules and metadata.
+        Tuple[List[Chem.Mol], List[Dict], float]
+            Processed molecules, metadata, and the fraction of poses that
+            fell back to input topology (0.0 = all assigned; 1.0 = none
+            assigned). The caller uses this rate to decide whether to
+            retry with the fallback_topology_path template.
         """
         processed_poses: List[Chem.Mol] = []
         metadata: List[Dict] = []
@@ -628,6 +671,10 @@ class ConsensusAnalyzer:
                         "output_file": dr.output_path,
                     })
 
+        total = sum(total_counts.values())
+        failed = sum(fail_counts.values())
+        fail_rate = failed / total if total > 0 else 0.0
+
         if fail_counts:
             breakdown = ", ".join(
                 f"{eng} {fail_counts[eng]}/{total_counts[eng]}"
@@ -635,15 +682,14 @@ class ConsensusAnalyzer:
             )
             logger.warning(
                 f"Bond order standardization fell back to input topology for "
-                f"{sum(fail_counts.values())}/{sum(total_counts.values())} "
-                f"poses ({breakdown})"
+                f"{failed}/{total} poses ({breakdown})"
             )
 
         logger.info(
             f"Standardized {len(processed_poses)} poses from "
             f"{len(successful_results)} engines"
         )
-        return processed_poses, metadata
+        return processed_poses, metadata, fail_rate
 
     def _assign_bond_orders(
         self, mol: Chem.Mol, engine_name: str, pose_idx: int

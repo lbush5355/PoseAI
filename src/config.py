@@ -44,6 +44,11 @@ class ConsensusConfig:
     rmsd_parallel_threshold: int = 30
     rmsd_n_workers: int = 0  # 0 = auto: max(1, cpu_count // 2)
 
+    # Fraction of poses that must fail bond-order assignment against the
+    # crystal mol2 master template before the fallback ideal SDF is tried.
+    # 0.5 = retry if more than half the poses couldn't be standardized.
+    bond_order_fallback_threshold: float = 0.5
+
     # Default ligand SMILES (Imatinib/STI)
     # Override with ligand_smiles parameter in ConsensusAnalyzer
     default_ligand_smiles: str = (

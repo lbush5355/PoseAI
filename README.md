@@ -2,7 +2,7 @@
 
 **Status: v0.9 pre-release** — The pipeline is fully functional end-to-end. The v1.x milestone requires a minimum of 6/8 gold-standard targets scoring Success or Acceptable, zero Error results, and functional unit test coverage. Current benchmark: 3/8 Success, 3/8 Poor, 2/8 Error (see [Benchmark Performance](#current-benchmark-performance)).
 
-PoseAI is a modular computational framework designed to execute and harmonize ligand-binding simulations across multiple docking scoring functions. By integrating **Smina** (empirical force-field), **Gnina** (deep learning-based), and **LeDock** (stochastic/physics-based), the pipeline identifies high-confidence binding modes through unsupervised spatial clustering. Cross-engine agreement is quantified as an **Ensemble Confidence Score** combining multi-engine representation (70%) and cluster population (30%).
+PoseAI is a modular computational framework designed to execute and harmonize ligand-binding simulations across multiple docking scoring functions. By integrating **Gnina** (Vina-family sampler with CNN rescoring), **LeDock** (simulated annealing / independent architecture), and **Smina** (Vina-family empirical force-field baseline), the pipeline collects the full pose output from all engines into a shared pool and applies HDBSCAN clustering on a pairwise heavy-atom RMSD matrix to identify binding modes where independently operating engines converge in 3D space. Cross-engine agreement is quantified as an **Ensemble Confidence Score** combining multi-engine representation (70%) and cluster population (30%).
 
 The system runs exclusively on **Google Colab** to guarantee reproducibility, abstracting away dependency management and system architecture differences by automatically provisioning a standardized Ubuntu environment with ELF-validated engine binaries.
 
@@ -60,7 +60,7 @@ The following development directions are aimed at advancing PoseAI from a valida
 
 **Expanded benchmarking against CASF-2016.** The current 8-target validation set is appropriate for development but too small to make performance claims against the field. The CASF-2016 benchmark (285 protein-ligand complexes from PDBbind with standardized scoring, ranking, and docking power evaluations) is the community standard for evaluating docking pipelines. Validation against CASF-2016 would establish PoseAI's scientific standing and make its performance directly comparable to published methods.
 
-**Additional docking engine support.** AutoDock Vina — the most widely cited open-source docking tool in the literature — would broaden the consensus base and make performance more directly comparable to published benchmarks. The `EnsembleManager` in `docking.py` and the `EngineType` enum are designed to accommodate additional engines with minimal changes.
+**Engine diversity upgrade: DiffDock integration.** Smina and Gnina share the same underlying pose sampling algorithm — both are forks of AutoDock Vina using iterated local search — and differ only at the rescoring stage. This means two of three current engines sample pose space the same way, limiting the architectural independence that makes cross-engine spatial agreement meaningful. The planned upgrade replaces Smina with **DiffDock**, an end-to-end diffusion model trained on PDBbind that treats binding pose generation as a generative modeling problem with no explicit force field or hand-engineered scoring function. The resulting three-engine set — DiffDock (generative ML), Gnina (physics sampling + learned rescoring), LeDock (stochastic physics) — represents three genuinely orthogonal search paradigms. The core hypothesis is that engines failing by different mechanisms will fail on different targets, making their spatial agreement a stronger and more discriminating signal than agreement between Vina-family methods. The `EnsembleManager` and `EngineType` enum are designed to accommodate this with minimal structural changes.
 
 **Multi-residue ligand support.** Targets where the inhibitor is deposited as a polymer chain (e.g., 1A30) return no results from RCSB's non-polymer entity endpoint, preventing ideal SDF retrieval. Full support requires composing the ligand topology from its constituent PDB Chemical Component Dictionary residues.
 
@@ -231,6 +231,20 @@ Per-target aggregate statistics (success rate, pass rate, best RMSD) are also di
 
 ---
 
+## Related Work
+
+Consensus docking approaches fall into two paradigms in the literature.
+
+**Score and rank aggregation** is the dominant paradigm. Tools including dockECR (Gimeno et al., 2021), DockingPie (Paiardi et al., 2022), and DockM8 run each engine independently and combine per-molecule scores or ranks using exponential consensus ranking, Z-score normalization, or majority vote. These methods never compare poses spatially; an engine's contribution is its numerical score, not the geometry of its predicted binding mode.
+
+**Pose-based spatial consensus** methods compare actual 3D pose coordinates across engines. dockECR includes an RMSD-Based Scoring component that computes pairwise RMSD between each engine's single best pose, using spatial agreement as a secondary confidence signal. **MetaDOCK** (Ramírez & Caballero, 2023) is the most direct precedent for PoseAI's approach: it pools the top-5 poses per engine into a shared set (15 total), applies fixed 2.5 Å RMSD-threshold grouping to the joint pool, and selects the best-scored pose from the largest cluster. **VoteDock** (Plewczynski et al., 2011) similarly pooled poses from seven engines and applied hierarchical clustering, predating density-based methods.
+
+PoseAI extends this direction in two specific respects. First, it applies HDBSCAN to the full all-pairs heavy-atom RMSD matrix across the entire cross-engine pose pool — a density-based algorithm that adapts to the natural cluster structure of the pose distribution without requiring a predetermined distance cutoff or cluster count. MDSCAN (Ferruz et al., 2022) is the only prior work applying HDBSCAN to an RMSD distance matrix in structural biology, in the context of molecular dynamics trajectory clustering rather than docking. Second, PoseAI ranks clusters by the **number of contributing engines** as the primary selection criterion rather than by pose score. This makes the selection explicitly score-agnostic: the consensus binding mode is defined by where independently operating engines converge in 3D space, not by what any individual scoring function assigns.
+
+On engine diversity, **ESSENCE-Dock** (Sánchez-Murcia et al., 2024) makes the strongest published argument for combining algorithmically distinct engines, pairing DiffDock (end-to-end diffusion model), Gnina (CNN-augmented Vina sampler), and LeadFinder (genetic algorithm). The current PoseAI engine set — Gnina and Smina (both Vina-family) plus LeDock (simulated annealing) — provides partial architectural diversity. Replacing Smina with DiffDock is a targeted roadmap item to achieve three fully orthogonal search paradigms and strengthen the core independence assumption that underlies the spatial consensus approach.
+
+---
+
 ## Development Notes
 
 The pipeline runs exclusively on **Google Colab** (Linux x86-64). Local setup via `pip install -r requirements.txt` supports editing and linting only — functional testing requires a Colab session with GPU runtime.
@@ -278,3 +292,12 @@ The PoseAI framework integrates several peer-reviewed docking engines and bioinf
 *   **PDBbind:** Liu, Z., et al. (2017). Forging the Basis for Developing Protein-Ligand Interaction Scoring Functions. *Accounts of Chemical Research*, 50(2): 302-309.
 *   **RCSB Protein Data Bank:** Berman, H. M., et al. (2000). The Protein Data Bank. *Nucleic Acids Research*, 28(1), 235–242.
 *   **RCSB PDB API:** Bittrich, S., et al. (2023). RCSB Protein Data Bank: Powerful new tools for exploring 3D structures of biological macromolecules for basic and applied research and education in fundamental biology, biomedicine, biotechnology, bioengineering and energy sciences. *Nucleic Acids Research*, 51(D1), D488–D501. https://doi.org/10.1093/nar/gkac1019
+*   **CASF-2016:** Su, M., et al. (2019). Comparative Assessment of Scoring Functions: The CASF-2016 Update. *Journal of Chemical Information and Modeling*, 59(2), 895–913. https://doi.org/10.1021/acs.jcim.8b00545
+
+**Related Consensus Docking Methods**
+*   **dockECR:** Gimeno, A., et al. (2021). Open consensus docking and ranking protocol for virtual screening of small molecules. *Journal of Molecular Structure*, 1229, 129519. https://doi.org/10.1016/j.molstruc.2020.129519
+*   **DockingPie:** Paiardi, G., et al. (2022). DockingPie: a consensus docking plugin for PyMOL. *Bioinformatics*, 38(17), 4233–4234. https://doi.org/10.1093/bioinformatics/btac452
+*   **MetaDOCK:** Ramírez, D., & Caballero, J. (2023). MetaDOCK: A Combinatorial Molecular Docking Approach. *ACS Omega*, 8(6), 5718–5731. https://doi.org/10.1021/acsomega.2c07784
+*   **ESSENCE-Dock:** Sánchez-Murcia, P. A., et al. (2024). ESSENCE-Dock: A Consensus-Based Approach to Enhance Virtual Screening Enrichment in Drug Discovery. *Journal of Chemical Information and Modeling*, 64(6), 1829–1843. https://doi.org/10.1021/acs.jcim.3c01617
+*   **MDSCAN:** Ferruz, N., et al. (2022). MDSCAN: RMSD-based HDBSCAN clustering of long molecular dynamics. *Bioinformatics*, 38(23), 5191–5192. https://doi.org/10.1093/bioinformatics/btac666
+*   **DiffDock:** Corso, G., et al. (2023). DiffDock: Diffusion Steps, Twists, and Turns for Molecular Docking. *International Conference on Learning Representations (ICLR)*. arXiv:2210.01776.

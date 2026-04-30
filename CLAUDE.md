@@ -366,11 +366,39 @@ redocking validation into genuine scientific contribution.
    - Target: CASF-2016 (285 complexes, community standard for scoring
      power / ranking power / docking power evaluation).
 
-### Additional Engine Support
-   - AutoDock Vina is the most widely cited free docking tool; adding
-     it broadens consensus and enables direct comparison to literature.
+### Engine Diversity Upgrade: DiffDock
+   - Smina and Gnina are both forks of AutoDock Vina; they share the
+     same iterated local search sampling algorithm and differ only at
+     the rescoring stage. Two of three current engines therefore sample
+     pose space identically, weakening the independence assumption that
+     makes cross-engine spatial agreement meaningful.
+   - Plan: replace Smina with DiffDock (end-to-end diffusion model,
+     no explicit force field, trained on PDBbind). Target three-engine
+     set: DiffDock (generative ML) + Gnina (physics sampling + CNN
+     rescoring) + LeDock (simulated annealing). Three orthogonal
+     search paradigms, genuinely independent failure modes.
    - EnsembleManager and EngineType are designed to accommodate this
-     with minimal changes.
+     with minimal structural changes.
+   - This upgrade directly supports the publication claim that spatial
+     agreement across architecturally distinct engines is a stronger
+     signal than score aggregation.
+
+### Publication Pathway
+   The core publishable claim is: density-based clustering of the full
+   cross-engine pose pool with engine-count-primary ranking outperforms
+   fixed-threshold clustering (MetaDOCK) and score aggregation (dockECR)
+   on CASF-2016 docking power (SR₁ = % targets where top-ranked pose
+   has RMSD < 2.0 Å). This is a specific, testable, controlled claim.
+   Two supporting experiments make it defensible:
+   1. HDBSCAN vs. fixed 2.0 Å cutoff on the same pose pool: same
+      engines, same poses, different clustering — shows density-based
+      adaptation improves SR₁.
+   2. Engine-count ranking vs. best-score-in-cluster on the same
+      clusters: same clustering, different selection — shows
+      score-agnostic ranking is more robust across protein families.
+   The de novo mode (fpocket + pharmacophore matching) is a second
+   contribution, likely a separate paper or a major extension section.
+   Both require CASF-2016 validation to make performance claims.
 
 ---
 

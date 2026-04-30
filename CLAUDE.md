@@ -112,8 +112,6 @@ PoseAI/
                           runs; displayed at end of Cell 5 for presentation.
     visualizer.py      -- DockingVisualizer: py3Dmol rendering, engine-color-
                           coded poses, HTML export
-  tests/
-    test_pipeline.py   -- pytest suite (currently imports and structure only)
   PoseAI.ipynb         -- Colab notebook entry point
   requirements.txt     -- Pip dependencies
   pyproject.toml       -- Package metadata and dev tooling config
@@ -124,7 +122,7 @@ PoseAI/
 
 ### What Is and Is Not Tracked in GitHub
 
-Tracked: all src/ modules, tests/, notebook, requirements.txt,
+Tracked: all src/ modules, notebook, requirements.txt,
          pyproject.toml, documentation
 Not tracked: results/, batch_results/, dataset/, fast_lane/, bin/
              (binaries are downloaded fresh each Colab session)
@@ -282,8 +280,12 @@ Runtime paths (for context only):
 ### Critical (fix before v1.x)
 
 1. **No functional unit tests**
-   - tests/test_pipeline.py currently covers imports and structure only
-   - No functional test coverage on any module
+   - No test suite exists; all pipeline correctness is validated through
+     the Colab batch run against gold-standard targets
+   - Post-v1.x goal: build a pytest suite under tests/ with mocked
+     external binaries and RCSB calls, covering at minimum consensus.py
+     cluster ranking, _load_dok() multi-pose recovery, Class C retry
+     trigger, and _grade_rmsd() boundary conditions
 
 ### Medium
 
@@ -377,13 +379,14 @@ Standard levels:
 
 ### Testing
 
-- All tests in tests/ using pytest
+No test suite currently exists (post-v1.x goal — see Known Issues).
+When implemented, tests should:
+- Live in tests/ using pytest
 - Mock all external binaries (fpocket, smina, gnina, ledock, obabel)
 - Mock all RCSB network calls
-- Test fixtures in tests/fixtures/
-- Test files named test_<module>.py
-- Every public method needs at least one test
-- Every error path needs at least one test
+- Use fixtures in tests/fixtures/
+- Name files test_<module>.py
+- Cover every public method and every error path
 
 ---
 
@@ -486,4 +489,5 @@ Pipeline is considered production-ready when:
 - Minimum 6/8 targets score Success or Acceptable
 - Zero NaN results (no unhandled pipeline errors)
 - All Critical known issues resolved
-- tests/test_pipeline.py contains functional coverage of all modules
+- Functional pytest suite in tests/ covers all modules with mocked
+  external binaries and RCSB calls

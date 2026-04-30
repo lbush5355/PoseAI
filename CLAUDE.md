@@ -114,23 +114,18 @@ PoseAI/
                           coded poses, HTML export
   tests/
     test_pipeline.py   -- pytest suite (currently imports and structure only)
-  data/
-    1iep/              -- Sample PDB target and preprocessed files
-                          (tracked in repo as reference structure)
   PoseAI.ipynb         -- Colab notebook entry point
-  environment.yml      -- Conda environment spec
   requirements.txt     -- Pip dependencies
   pyproject.toml       -- Package metadata and dev tooling config
   CLAUDE.md            -- This file
-  README.md            -- Reproducibility-focused project readme
-  CONTRIBUTING.md      -- Contribution guidelines
+  README.md            -- Project documentation
   LICENSE              -- MIT license
 ```
 
 ### What Is and Is Not Tracked in GitHub
 
-Tracked: all src/ modules, tests/, data/ sample structures,
-         notebook, environment specs, documentation
+Tracked: all src/ modules, tests/, notebook, requirements.txt,
+         pyproject.toml, documentation
 Not tracked: results/, batch_results/, dataset/, fast_lane/, bin/
              (binaries are downloaded fresh each Colab session)
 

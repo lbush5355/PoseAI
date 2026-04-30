@@ -14,14 +14,14 @@ Developed as a course project for CHEM 4640 at the University of Colorado Denver
 
 The pipeline is composed of distinct functional modules in the `src/` directory:
 
-*   **`runtime.py`**: Colab session bootstrap. Installs Python dependencies, adds 32-bit architecture support (required for the LeDock/lepro legacy binaries), builds fpocket from source if absent, and downloads each docking engine binary via `download_and_verify_binary()`, which reads the ELF header and rejects HTML error pages and wrong-architecture files before they reach subprocess.
-*   **`preprocessor.py`**: Automates structural retrieval from RCSB, solvent/ion stripping, and engine-specific format generation (PDBQT, mol2) via Open Babel. Provides `get_ligand_centroid()` (active binding site detection via crystal ligand heavy-atom coordinates), `fetch_rcsb_smiles()`, `fetch_rcsb_ideal_sdf()`, and `fetch_rcsb_entry_ligand_codes()` (GraphQL lookup of drug-like non-polymer entities for a given PDB entry).
-*   **`docking.py`**: Orchestrates parallel subprocess execution of Gnina, Smina, and LeDock via `ProcessPoolExecutor`, with adaptive CPU allocation based on GPU availability and independent per-engine and pool-level timeout enforcement.
-*   **`consensus.py`**: Loads and topology-standardizes poses across all engines using a 5-level master template fallback (crystal mol2/sdf/pdb → RCSB ideal SDF → SMILES → stereo-stripped SMILES retry → 3D inference from docking output). Computes a pairwise symmetry-corrected heavy-atom RMSD matrix (parallelized above a configurable pose-count threshold), clusters via HDBSCAN, and ranks clusters deterministically by engine count, cluster size, and intra-cluster RMSD.
-*   **`pipeline.py`**: Unified end-to-end orchestration. `run_from_rcsb()` handles single-target runs from RCSB; `run_from_local()` handles batch validation over PDBbind-layout datasets. Both return a `TargetResult` dataclass carrying status, native RMSD, confidence score, cluster DataFrame, analyzer state, and docking results.
-*   **`run_history.py`**: Persistent run tracking. `append_run()` writes one row per target to `run_history.csv` on Google Drive; `per_target_stats()` aggregates cross-session success rate, pass rate, and best RMSD per target for presentation and evaluation.
-*   **`visualizer.py`**: Generates interactive 3D native-overlay visualizations using py3Dmol, with engine-color-coded poses (Smina: green, Gnina: blue, LeDock: red, consensus cluster: gold). Exports HTML reports for review outside Colab.
-*   **`config.py`**: Centralized typed dataclass configuration with named fields for all tunable parameters. Supports runtime overrides via `POSEAI_<MODULE>__<PARAM>` environment variables without modifying source. See [Configuration](#configuration) for details.
+*   **`runtime.py`**: Session bootstrap — installs dependencies, downloads and ELF-validates engine binaries, builds fpocket.
+*   **`preprocessor.py`**: Fetches structures from RCSB, strips solvent, isolates the ligand by residue code, and generates engine-ready PDBQT/mol2 files via Open Babel.
+*   **`docking.py`**: Runs Gnina, Smina, and LeDock in parallel via `ProcessPoolExecutor` with per-engine and pool-level timeouts.
+*   **`consensus.py`**: Standardizes pose topology across engines, computes the all-pairs heavy-atom RMSD matrix, clusters via HDBSCAN, and ranks clusters by engine count → size → intra-RMSD.
+*   **`pipeline.py`**: End-to-end orchestration. `run_from_rcsb()` for single targets, `run_from_local()` for batch runs over a PDBbind-layout dataset. Returns a `TargetResult` with status, RMSD, confidence score, and cluster data.
+*   **`run_history.py`**: Appends one row per run to `run_history.csv` on Drive and aggregates per-target success rate, pass rate, and best RMSD across sessions.
+*   **`visualizer.py`**: Renders engine-color-coded poses and the consensus cluster in py3Dmol; exports HTML reports for review outside Colab.
+*   **`config.py`**: Typed dataclass configuration for all tunable parameters, with `POSEAI_<MODULE>__<PARAM>` environment variable overrides. See [Configuration](#configuration).
 
 ---
 
@@ -222,15 +222,7 @@ The pipeline runs exclusively on **Google Colab** (Linux x86-64). Local setup vi
 
 **Commit conventions:** `feat:` / `fix:` / `docs:` / `test:` / `refactor:` prefixes. Stage specific files rather than `git add -A`.
 
-**Non-negotiable coding rules for all `src/` changes:**
-- No bare `except` — always catch specific exceptions with a logged diagnostic
-- No magic numbers — all constants in `config.py` as named dataclass fields
-- No `os.chdir()` — use `cwd=` in subprocess calls
-- No hardcoded `/content/` paths — all paths from constructor arguments or config
-- No duplicate imports — one import per dependency at the top of the file
-- No silent exception swallowing — every caught exception must be logged
-
-Type hints are required on all function signatures. f-strings only — no `%` or `.format()`. See `CLAUDE.md` for the full coding standards reference.
+Coding standards (type hints, logging conventions, no magic numbers, no bare `except`) are documented in `CLAUDE.md`.
 
 ---
 

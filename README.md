@@ -78,6 +78,24 @@ The following development directions are aimed at advancing PoseAI from a valida
 
 **`max_engines_for_consensus` config parameter.** The confidence score denominator is hardcoded to 3.0 in `get_confidence_score()`. Adding a fourth engine without updating source silently caps its contribution.
 
+### Path to Publication
+
+PoseAI makes two specific methodological claims that are testable against published literature on a community-standard benchmark.
+
+**Core claim.** Score-agnostic density-based consensus — HDBSCAN on a full all-pairs heavy-atom RMSD matrix with engine-count-primary cluster ranking — identifies near-native binding modes more reliably than fixed-threshold clustering with score-based selection. The existing implementation embodies this claim on 8 targets; the question is whether it holds at the scale needed for a peer-reviewed result.
+
+**Experiment 1: clustering method.** Run the same engine pool (Gnina + LeDock + Smina) on CASF-2016 (285 protein-ligand complexes) under two conditions: HDBSCAN with adaptive density detection, and a fixed 2.0 Å RMSD cutoff applied to the same pose pool. Success rate and mean RMSD across all 285 targets isolates the contribution of the clustering algorithm from all other pipeline choices.
+
+**Experiment 2: ranking criterion.** On the same CASF-2016 runs, compare engine-count-primary cluster selection against best-score-in-cluster selection (using Gnina's CNN score as the representative). A statistically significant improvement by engine-count-primary ranking supports the score-agnostic independence argument independently of Experiment 1.
+
+**Comparison baselines.** MetaDOCK (fixed 2.5 Å threshold, best-scored pose in largest cluster) and dockECR (exponential consensus ranking with RMSD component) are re-implemented or rerun on the same CASF-2016 set. Both are open methodologies with published code, making a same-dataset comparison feasible.
+
+**Engine upgrade prerequisite.** The DiffDock engine swap (Smina → DiffDock) is a prerequisite for the strongest version of the core claim, since the current Gnina/Smina pair shares Vina-family sampling. With DiffDock replacing Smina, the three engines represent genuinely orthogonal paradigms, and cross-engine agreement becomes a stronger independence signal. Experiments 1 and 2 can be run on the current three-engine set as a baseline, with the DiffDock results as the headline result.
+
+**De novo mode as a second contribution.** The pharmacophore-to-pocket matching extension — fpocket for pocket detection, RDKit `MolChemicalFeatures` for ligand pharmacophore profiling — is architecturally independent of the consensus clustering work and addresses a different problem (no crystallographic reference available). If the de novo binding site experiments produce compelling results, this warrants a separate follow-up contribution rather than inclusion in the primary consensus validation study.
+
+**What is needed before submission.** Access to the full CASF-2016 dataset (available from PDBbind with academic registration), DiffDock integration and validation on the current benchmark set, calibration of the Ensemble Confidence Score against a held-out subset, and functional unit test coverage to support the claims in the methods section.
+
 ---
 
 ## Key Engineering Challenges
@@ -232,6 +250,8 @@ Per-target aggregate statistics (success rate, pass rate, best RMSD) are also di
 ---
 
 ## Related Work
+
+PoseAI was developed independently. The tools described below were identified post-hoc for methodological comparison to situate the work within the broader consensus docking literature; none of them informed the design or implementation of PoseAI.
 
 Consensus docking approaches fall into two paradigms in the literature.
 

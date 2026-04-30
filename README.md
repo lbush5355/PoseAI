@@ -50,14 +50,33 @@ The pipeline is composed of distinct functional modules in the `src/` directory:
 
 ## Future Roadmap (Post-v1.x)
 
-The following are scoped out of the current milestone:
+The following development directions are aimed at advancing PoseAI from a validated redocking pipeline toward a tool capable of genuine scientific contribution to structure-based drug discovery. Most existing consensus docking pipelines assume a known binding site and evaluate poses purely by geometric convergence; the priorities below address both of those limitations.
 
-*   **Functional test coverage**: `tests/test_pipeline.py` currently validates imports and module structure only. All modules require functional coverage with mocked external binaries and RCSB network calls before the pipeline can be considered regression-safe.
-*   **Multi-residue ligand support**: Targets where the inhibitor is deposited as a polymer chain (e.g., 1A30) return no results from RCSB's non-polymer entity endpoint. Full support requires composing the ligand topology from constituent PDB Chemical Component Dictionary residues.
-*   **RMSD recovery for topology-incompatible ligands**: When `AssignBondOrdersFromTemplate` fails in both directions (see Known Limitations — 1HSG, 1IEP), the planned fix is an MCS-based coordinate-copy overlay: match the crystal mol2 atom positions onto the ideal SDF graph via maximum common substructure, then compute RMSD against the reconciled reference. Fall back to `Status=Error` with HTML overlay as the validation path only if that also fails.
-*   **Pipeline checkpointing**: A crash at any stage currently discards all work for that target. Saving intermediate results after preprocessing, docking, and clustering would allow restarts without full re-runs.
-*   **Configurable pocket detection strategy**: `PocketAnalyzer` (fpocket-based) in `site_finder.py` is fully implemented but not called. The active strategy should be an explicit config field rather than implicit code routing.
-*   **`max_engines_for_consensus` config parameter**: The confidence score denominator is currently hardcoded to 3.0 in `get_confidence_score()`. Adding a fourth docking engine without updating source would silently cap its contribution.
+### Scientific Capabilities
+
+**De novo binding site discovery.** The current pipeline requires a co-crystallized ligand to define the docking search box via `get_ligand_centroid()`, restricting it to redocking against targets with known structures. The planned extension uses fpocket — already built and installed in Cell 1 — to identify candidate binding pockets from receptor surface geometry alone via Voronoi tessellation, then selects the most compatible pocket by matching the ligand's pharmacophoric features (hydrogen bond donors/acceptors, hydrophobic regions, aromatic rings via RDKit's `MolChemicalFeatures`) against each pocket's chemical descriptors. `PocketAnalyzer` in `site_finder.py` already implements the fpocket wrapper and output parser; the pharmacophore-to-pocket matching layer is the remaining work. This enables docking against novel receptor targets with no crystallographic data — the primary scientific limitation of the current approach.
+
+**Pharmacophore-aware confidence scoring.** The current Ensemble Confidence Score measures only spatial convergence — how tightly poses cluster and how many engines agree. It cannot distinguish a geometrically convergent pose that satisfies key chemical interactions from one that does not, a known failure mode in consensus docking. Adding a pharmacophore satisfaction component — verifying that HBD groups face HBA residues, hydrophobic groups are buried in hydrophobic pockets, etc. — would make the confidence score chemically meaningful rather than purely geometric.
+
+**Expanded benchmarking against CASF-2016.** The current 8-target validation set is appropriate for development but too small to make performance claims against the field. The CASF-2016 benchmark (285 protein-ligand complexes from PDBbind with standardized scoring, ranking, and docking power evaluations) is the community standard for evaluating docking pipelines. Validation against CASF-2016 would establish PoseAI's scientific standing and make its performance directly comparable to published methods.
+
+**Additional docking engine support.** AutoDock Vina — the most widely cited open-source docking tool in the literature — would broaden the consensus base and make performance more directly comparable to published benchmarks. The `EnsembleManager` in `docking.py` and the `EngineType` enum are designed to accommodate additional engines with minimal changes.
+
+**Multi-residue ligand support.** Targets where the inhibitor is deposited as a polymer chain (e.g., 1A30) return no results from RCSB's non-polymer entity endpoint, preventing ideal SDF retrieval. Full support requires composing the ligand topology from its constituent PDB Chemical Component Dictionary residues.
+
+**Receptor flexibility.** All current docking uses a rigid receptor model. For targets with known conformational variability — kinases, GPCRs, allosteric sites — docking against an ensemble of receptor conformations generated from MD snapshots or rotamer sampling would improve accuracy and is a natural extension of the existing ensemble philosophy.
+
+### Technical Fixes
+
+**RMSD recovery for topology-incompatible ligands.** For 1HSG and 1IEP, `AssignBondOrdersFromTemplate` fails in both directions, blocking native RMSD calculation even though clustering succeeds. The planned fix is an MCS-based coordinate-copy overlay: match the crystal mol2 atom positions onto the ideal SDF graph via maximum common substructure, then compute RMSD against the reconciled reference.
+
+### Engineering
+
+**Functional test coverage.** No test suite currently exists. Priority targets: `_summarize_clusters()` deterministic sort, `_load_dok()` multi-pose recovery, `analyze_ensemble()` Class C retry trigger, and `_grade_rmsd()` boundary conditions — all mockable without running docking engines.
+
+**Pipeline checkpointing.** A crash at any stage discards all work for that target. Saving intermediate results after preprocessing, docking, and clustering would allow restarts without full re-runs.
+
+**`max_engines_for_consensus` config parameter.** The confidence score denominator is hardcoded to 3.0 in `get_confidence_score()`. Adding a fourth engine without updating source silently caps its contribution.
 
 ---
 

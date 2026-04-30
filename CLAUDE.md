@@ -324,15 +324,53 @@ Runtime paths (for context only):
 
 ### Low
 
-5. **Active pocket detection method is not the documented one**
-   - get_ligand_centroid() in preprocessor.py is active
-   - PocketAnalyzer (fpocket) in site_finder.py is documented but
-     not currently called
-   - Preferred method should be made explicit in config
-
-6. **No checkpointing**
+5. **No checkpointing**
    - Pipeline crash at any stage loses all work for that target
    - Intermediate results should be saved after each stage
+
+---
+
+## Post-v1.x Scientific Goals
+
+These represent the primary directions for advancing PoseAI beyond
+redocking validation into genuine scientific contribution.
+
+### De Novo Binding Site Discovery (highest priority)
+   - Current pipeline requires a co-crystallized ligand to define the
+     docking box via get_ligand_centroid(). This restricts it to
+     redocking against known structures.
+   - Plan: use fpocket (already built and installed in Cell 1) to find
+     candidate pockets from receptor surface geometry alone. Match
+     ligand pharmacophoric features (HBD/HBA/hydrophobic/aromatic via
+     RDKit MolChemicalFeatures) against each pocket's chemical
+     descriptors to select the best pocket before docking.
+   - PocketAnalyzer in site_finder.py already implements the fpocket
+     wrapper and output parser. The pharmacophore-to-pocket matching
+     layer is the remaining work.
+   - Do NOT remove or refactor site_finder.py — it is the foundation
+     for this capability.
+
+### Pharmacophore-Aware Confidence Scoring
+   - Current ECS measures only spatial convergence across engines.
+     It cannot distinguish a geometrically convergent pose that
+     satisfies key interactions from one that does not.
+   - Plan: add a pharmacophore satisfaction component to the confidence
+     score — verify HBD/HBA complementarity, hydrophobic burial, etc.
+     between the consensus pose and the receptor binding site.
+   - Requires the de novo mode pocket analysis as a prerequisite
+     (need pocket residue features to compare against ligand features).
+
+### Expanded Benchmarking
+   - Current 8-target set is sufficient for development but too small
+     for scientific claims.
+   - Target: CASF-2016 (285 complexes, community standard for scoring
+     power / ranking power / docking power evaluation).
+
+### Additional Engine Support
+   - AutoDock Vina is the most widely cited free docking tool; adding
+     it broadens consensus and enables direct comparison to literature.
+   - EnsembleManager and EngineType are designed to accommodate this
+     with minimal changes.
 
 ---
 

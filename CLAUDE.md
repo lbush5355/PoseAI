@@ -289,13 +289,26 @@ Runtime paths (for context only):
      confirm RDKit can actually parse the output
    - A corrupted but non-empty file will pass validation silently
 
-4. **calculate_native_rmsd() bond order fallback is unreliable**
-   - When reference_smiles is None:
-     AllChem.AssignBondOrdersFromTemplate(raw_ref, raw_ref) uses the
-     molecule as its own template
-   - May not correctly assign bond orders for all ligand types
-   - Should log a warning or require explicit SMILES for reliable
-     validation results
+4. **_compute_native_rmsd() ref_mol construction fails for complex ligands
+   (post-presentation project)**
+   - When the crystal mol2 topology is incompatible with the ideal SDF
+     (the same condition that triggers Class C auto-retry), both
+     AssignBondOrdersFromTemplate(master_ref, native_mol) and the CalcRMS
+     substructure match fail. The fallback ref_mol = analyzer.master_ref
+     is the ideal SDF at RCSB canonical coordinates, not the crystal
+     binding site — making the RMSD scientifically meaningless even if
+     CalcRMS could run. Affects 1HSG and 1IEP in the current batch.
+   - Root cause: the crystal mol2 for complex peptidomimetic/flexible
+     ligands has different aromatic/charge perception than the ideal SDF,
+     blocking template assignment in both directions.
+   - Fix plan (post-presentation): when AssignBondOrdersFromTemplate fails,
+     attempt to recover native coordinates by overlaying the crystal mol2
+     atom positions onto the ideal SDF graph via atom-by-atom coordinate
+     copy after a maximum common substructure match; fall back to
+     Status=Error with HTML overlay as the validation path if that also
+     fails. Until fixed, 1HSG/1IEP report Status=Error with note that
+     clustering succeeded — use the generated HTML overlay for manual
+     validation.
 
 ### Low
 
@@ -545,18 +558,18 @@ dataset/
 - > 3.0 angstroms RMSD: Poor (pipeline failed on this target)
 - NaN: Pipeline error (crash, failed docking, or clustering failure)
 
-### Current Benchmark (last recorded run, 2026-04-29)
+### Current Benchmark (last recorded run, 2026-04-30)
 
-- Success:    3/8 (1FJS 1.62 Å, 1STP 0.62 Å, 1OWE 0.23 Å)
-- Poor:       3/8 (1HXW, 1A30, 1ETT regressed after Phase 3 refactor)
-- Error:      2/8 (1HSG, 1IEP — awaiting validation of ideal-SDF
-              auto-retry fix shipped in commit 67b736a)
-- Run was at POSES_PER_ENGINE=20 and EXHAUSTIVENESS=8. The Phase 3
-  refactor introduced a regression that dropped 4/8 → 3/8; root cause
-  was consensus.py receiving the ideal SDF as the primary (not fallback)
-  template, causing 100% bond-order assignment failures on simple
-  ligands. Fix (crystal mol2 primary, ideal SDF on-demand retry) shipped
-  in commits 7014fb9, 7522905, 67b736a but is not yet validated in Colab.
+- Success:    3/8 (1OWE 0.23 Å, 1STP 0.65 Å, 1FJS 1.63 Å)
+- Poor:       3/8 (1ETT 3.70 Å, 1HXW 5.55 Å, 1A30 7.78 Å)
+- Error:      2/8 (1HSG, 1IEP — clustering succeeded; RMSD validation
+              fails at CalcRMS due to ref_mol construction failure;
+              see Known Issues item 4)
+- Run was at POSES_PER_ENGINE=20 and EXHAUSTIVENESS=8. Class C
+  auto-retry confirmed: 1HSG/1HXW/1IEP all triggered the ideal-SDF
+  fallback (100% crystal mol2 fail rate → 0-7% post-retry). Clustering
+  is working for all 8 targets. The 2 remaining Errors are isolated to
+  the RMSD validation step, not docking or consensus.
 
 ### Known Limitation: Multi-Residue Ligands
 

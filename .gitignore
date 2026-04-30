@@ -4,11 +4,27 @@ results/
 batch_results/
 fast_lane/
 
+# Run history persists to Google Drive, not the repo
+run_history.csv
+
 # Python Cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Build and packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# Test coverage artifacts
+.coverage
+htmlcov/
+
+# Logs
+logs/
+*.log
 
 # Environment and IDE
 .ipynb_checkpoints/
@@ -20,4 +36,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Engine binaries (downloaded fresh each Colab session)
 bin/

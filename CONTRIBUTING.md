@@ -1,11 +1,15 @@
 # Contributing to PoseAI
 
-Thank you for your interest in contributing to PoseAI! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to PoseAI. This document covers the development workflow, coding standards, and testing requirements.
+
+## Important: Runtime vs. Development Environment
+
+The PoseAI pipeline runs **exclusively on Google Colab** (Linux x86-64). The docking engine binaries (Smina, Gnina, LeDock) are Linux ELF files and cannot be invoked on macOS or Windows. Local setup below is for editing and linting source code only — all functional testing must be run in Colab.
 
 ## Getting Started
 
 ### Prerequisites
-- Python 3.8 or higher
+- Python 3.10 or higher
 - Git
 - Conda (optional, but recommended)
 
@@ -13,28 +17,29 @@ Thank you for your interest in contributing to PoseAI! This document provides gu
 
 1. **Fork and Clone the Repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/PoseAI.git
+   git clone https://github.com/lbush5355/PoseAI.git
    cd PoseAI
    ```
 
 2. **Create a Development Environment**
-   
+
    Using Conda (recommended):
    ```bash
    conda env create -f environment.yml
    conda activate poseai
    ```
-   
+
    Or using pip:
    ```bash
    pip install -r requirements.txt
-   pip install pytest pytest-cov flake8 black isort
+   pip install pytest pytest-cov flake8 black isort mypy
    ```
 
 3. **Verify Installation**
    ```bash
    pytest tests/ -v
    ```
+   Note: the test suite currently covers imports and structure only. Functional validation requires a Colab session.
 
 ## Development Workflow
 
@@ -44,10 +49,8 @@ git checkout -b feature/your-feature-name
 ```
 
 ### 2. Make Your Changes
-- Write clean, well-documented code
-- Follow PEP 8 style guidelines
-- Add docstrings to all functions and classes
-- Include type hints where appropriate
+
+Follow the coding standards below. All changes to `src/` are subject to the non-negotiable rules in the next section.
 
 ### 3. Run Tests Locally
 ```bash
@@ -71,11 +74,14 @@ isort src tests
 
 # Lint with flake8
 flake8 src tests
+
+# Type-check with mypy
+mypy src
 ```
 
 ### 5. Commit Your Changes
 ```bash
-git add .
+git add <specific files>
 git commit -m "feat: add new feature description"
 ```
 
@@ -98,53 +104,59 @@ Then create a PR on GitHub with:
 
 ## Code Standards
 
-### Docstring Format
-Use Google-style docstrings:
-```python
-def function_name(param1: str, param2: int) -> bool:
-    """
-    Brief description of the function.
-    
-    Longer description if needed, explaining the purpose and any 
-    important details about the function's behavior.
-    
-    Args:
-        param1: Description of param1
-        param2: Description of param2
-        
-    Returns:
-        Description of return value
-        
-    Raises:
-        ValueError: When value is invalid
-    """
-    pass
-```
+These rules apply to all modules in `src/` and are enforced on every change.
+
+### Non-Negotiable Rules
+
+- **No bare except clauses.** Always catch specific exceptions (`ValueError`, `RuntimeError`, `IOError`, etc.) with a logged diagnostic. `except Exception as e: logger.error(...)` is acceptable. `except:` and `except Exception: pass` are never acceptable.
+- **No magic numbers.** All constants go in `config.py` as named dataclass fields.
+- **No `os.chdir()`.** Use the `cwd=` parameter in subprocess calls instead.
+- **No hardcoded paths to `/content/`.** All paths come from constructor arguments or config.
+- **No duplicate imports.** Each dependency imported once at the top of the file only.
+- **No silent exception swallowing.** Every caught exception must be logged at minimum.
 
 ### Type Hints
-Include type hints for better code clarity:
-```python
-from typing import List, Dict, Optional
 
-def process_data(
-    data: List[Dict[str, float]],
-    threshold: float = 0.5
-) -> Optional[List[str]]:
-    """Process data and return filtered results."""
-    pass
+Type hints are **required** on all function signatures and return types — not optional.
+
+```python
+def process_poses(
+    mols: List[Chem.Mol],
+    threshold: float,
+) -> Optional[pd.DataFrame]:
 ```
+
+### Comments and Docstrings
+
+Default to writing no comments. Only add a comment when the **why** is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug. One short line maximum — no multi-paragraph docstrings or multi-line comment blocks. Do not describe what the code does; well-named identifiers already do that.
+
+### String Formatting
+
+Use f-strings exclusively. No `%` formatting or `.format()`.
+
+### Logging
+
+Use the `poseai.*` namespace hierarchy:
+- `logging.getLogger("poseai.consensus")`
+- `logging.getLogger("poseai.docking")`
+- etc.
+
+Standard levels: DEBUG for internal state, INFO for stage milestones, WARNING for recoverable failures or fallbacks, ERROR for unrecoverable failures.
 
 ## Testing Guidelines
 
-- Write unit tests for new functions
-- Maintain or improve code coverage
-- Test edge cases and error conditions
+- All tests in `tests/` using pytest
+- Mock all external binaries (fpocket, smina, gnina, ledock, obabel)
+- Mock all RCSB network calls
+- Test fixtures in `tests/fixtures/`
+- Test files named `test_<module>.py`
+- Every public method needs at least one test
+- Every error path needs at least one test
 - Use descriptive test names: `test_<function>_<condition>`
 
 Example:
 ```python
-def test_preprocessor_strips_water_molecules(self):
-    """Test that water molecules are properly stripped."""
+def test_load_dok_returns_all_poses_for_multi_cluster_file():
     # test implementation
     pass
 ```
@@ -152,47 +164,42 @@ def test_preprocessor_strips_water_molecules(self):
 ## Module-Specific Guidelines
 
 ### preprocessor.py
-- Validate input file formats
-- Handle missing or corrupted files gracefully
-- Log all preprocessing steps
+- Validate input file formats at system boundaries (user-supplied files, RCSB responses)
+- Log all preprocessing steps at INFO level
+- `get_ligand_centroid()` is the active pocket detection method — raise `ValueError` on parse failure; do not fall back silently
 
 ### site_finder.py
-- Document coordinate systems (PDB vs internal)
-- Include validation of binding site centroids
-- Add tests for edge cases (e.g., multiple ligands)
+- `PocketAnalyzer` (fpocket-based) is implemented but not currently the active code path; `get_ligand_centroid()` in `preprocessor.py` is active
+- Changes here should not affect the active pipeline unless explicitly switching the detection strategy via config
 
 ### docking.py
-- Ensure subprocess calls are properly managed
-- Handle engine-specific parameter variations
-- Log docking progress and errors
+- Ensure all subprocess calls use `cwd=` not `os.chdir()`
+- Handle engine-specific parameter variations through `PipelineParams` / `DockingConfig`
+- Log docking progress and errors; never silently drop a failed engine run
 
 ### consensus.py
-- Document clustering algorithms and parameters
-- Include RMSD calculation validation
-- Test symmetry-aware scoring
+- Document clustering parameters and their effect on the grading scale
+- The master template fallback priority order is load-bearing — changes require updating CLAUDE.md
+- Test symmetry-aware RMSD via `rdMolAlign.GetBestRMS`
 
 ### visualizer.py
 - Test HTML output generation
-- Validate 3D coordinate transformations
-- Document visualization parameters
+- Validate that the receptor file exists before initializing (constructor raises `FileNotFoundError` if absent)
 
 ## Reporting Issues
 
 When reporting bugs, please include:
 1. Python version and OS
 2. Steps to reproduce
-3. Expected vs actual behavior
+3. Expected vs. actual behavior
 4. Error messages or stack traces
-5. Relevant code snippets
+5. Relevant log output (the `poseai.*` logger output, if available)
 
 ## Questions?
 
-- Check existing issues and discussions
+- Check existing issues and discussions on GitHub
 - Open a new GitHub Discussion for questions
-- Contact the maintainers via email
 
 ## License
 
-By contributing to PoseAI, you agree that your contributions will be licensed under the same license as the project.
-
-Thank you for contributing! 🎉
+By contributing to PoseAI, you agree that your contributions will be licensed under the MIT License as described in the `LICENSE` file.

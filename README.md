@@ -6,6 +6,8 @@ PoseAI is a modular computational framework designed to execute and harmonize li
 
 The system runs exclusively on **Google Colab** to guarantee reproducibility, abstracting away dependency management and system architecture differences by automatically provisioning a standardized Ubuntu environment with ELF-validated engine binaries.
 
+Developed as a course project at the University of Colorado Denver, Spring 2026.
+
 ---
 
 ## System Architecture

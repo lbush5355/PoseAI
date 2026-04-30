@@ -3,12 +3,17 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.8
+  - python>=3.10
   - rdkit
   - openbabel
   - numpy
   - pandas
   - hdbscan
+  - requests
+  - scikit-learn
+  - scipy
   - pip
   - pip:
     - py3Dmol
+    - pytest>=7.0
+    - pytest-cov>=4.0

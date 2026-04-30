@@ -1,5 +1,20 @@
 # CLAUDE.md -- PoseAI Project Instructions
 
+## What This File Is
+
+This is a [Claude Code](https://claude.ai/code) configuration file. Claude Code
+is an AI-assisted development tool; this file provides it with persistent project
+context — architecture, module responsibilities, coding standards, known issues,
+and benchmark state — so that AI-assisted development remains coherent across
+sessions. It is committed to the repository as the single source of truth for
+that context. It is not user documentation; see README.md for that.
+
+This project was developed for an AI in Chemistry & Biochemistry course at the
+University of Colorado Denver, where AI-assisted development was an explicit
+component of the coursework.
+
+---
+
 ## Overview
 
 PoseAI is an automated pipeline for ensemble molecular docking. It
@@ -322,119 +337,6 @@ Runtime paths (for context only):
    - Pipeline crash at any stage loses all work for that target
    - Intermediate results should be saved after each stage
 
-### Resolved
-
-- Cell 1 binary verification: previously CLAUDE.md claimed downloads
-  were "verified as valid ELF files matching the host architecture"
-  but Cell 1 just ran wget with no validation, so HTML error pages
-  and partial downloads silently became "binaries" that broke the
-  pipeline at subprocess.Popen with [Errno 8] Exec format error. Now
-  implemented via utils.download_and_verify_binary(), which reads the
-  ELF header (magic + e_machine), deletes-and-raises on any mismatch,
-  and skips re-download only when the existing file already validates.
-  Also recovers from a stale corrupt file in /content/fast_lane/bin/
-  by detecting the bad header and re-downloading.
-- Hardcoded STI SMILES: SMILES now fetched dynamically via
-  fetch_rcsb_smiles() based on LIGAND_CODE
-- Pool-level timeout: enforced via as_completed(timeout=pool_timeout)
-  in docking.py
-- Receptor existence check: DockingVisualizer raises FileNotFoundError
-  on init if receptor is missing
-- 17 bare except clauses in consensus.py: replaced with specific
-  exceptions (ValueError, RuntimeError) and logged diagnostics. The
-  5-level fallback pyramid in _load_and_standardize was flattened to
-  a 2-stage helper (_assign_bond_orders) since the deeper levels
-  were no-ops -- Chem.RemoveHs is idempotent. The dead "del mol"
-  loop in __del__ was removed.
-- preprocessor.py "Dynamically added" tail block: fetch_rcsb_smiles()
-  and get_ligand_centroid() are now proper module-level functions
-  with type hints and namespace logging. Imports moved to top of file
-  (numpy, requests added; duplicate Chem re-import removed). Both
-  silent except-pass clauses replaced with specific exceptions and
-  logged diagnostics. get_ligand_centroid() now raises ValueError on
-  parse failure instead of silently returning a (0,0,0) box -- the
-  prior fallback could mask docking-against-wrong-region failures as
-  Poor RMSD results in batch validation.
-- Hardcoded len == 3 ligand-code check in isolate_ligand: relaxed to
-  accept 1-3 alphanumeric characters per the PDB chemical component
-  dictionary spec (unblocks N3, ZN, MG, CA, etc.).
-- fetch_rcsb_smiles() field name bug: RCSB chemcomp API returns a
-  dict (not list) with uppercase keys SMILES_stereo and SMILES; code
-  was looking for lowercase smilesstereo and smiles, so the fetch
-  always returned None even for well-known ligands like STI.
-- SMILES robustness redesign in ConsensusAnalyzer: added
-  reference_ligand_path constructor param. New _resolve_master_template
-  tries crystal mol2/sdf/pdb first, then SMILES (with stereo-stripped
-  retry), then 3D inference as last resort. Eliminates the
-  SMILES-vs-3D-mismatch class of RDKit failures (tautomers, aromaticity
-  perception, charge states) for pose-validation runs by using the
-  deposited experimental structure directly. Notebook Cell 5 RMSD
-  comparison simplified to use analyzer.master_ref instead of the
-  AssignBondOrdersFromTemplate(native_mol, native_mol) self-template
-  trick, giving deterministic same-source comparison.
-- Engine imbalance in ensemble docking: SMINA --energy_range default
-  of 3 kcal/mol silently dropped most poses at high exhaustiveness
-  (now passes --energy_range 10 explicitly via DockingConfig.SMINA_ENERGY_RANGE);
-  LeDock .dok output was parsed by obabel -ipdb which only catches the
-  first MODEL (now split at "REMARK Cluster" markers in _load_dok and
-  each pose block is converted independently). Both fixes restore
-  genuine three-engine consensus in batch validation.
-- RMSD matrix parallelization: _compute_rmsd_matrix uses
-  multiprocessing.Pool above cfg.rmsd_parallel_threshold. New
-  rmsd_parallel_threshold and rmsd_n_workers fields on ConsensusConfig.
-- Log noise reduction: aggregated per-pose bond-order failures into a
-  single summary WARNING with engine breakdown counts; new
-  _quiet_rdkit() context manager silences RDKit's C++ stderr stream
-  during _load_and_standardize and _compute_rmsd_matrix.
-- Ideal-SDF topology source: new fetch_rcsb_ideal_sdf() and
-  fetch_rcsb_entry_ligand_codes() (GraphQL lookup) helpers in
-  preprocessor.py; ConsensusAnalyzer accepts topology_template_path
-  which takes highest priority in master template resolution.
-  Addresses bond-perception mismatch on complex peptidomimetic
-  ligands (1HSG/MK1, 1IEP/STI) where obabel's mol2 perception
-  conflicts with engine-output perception, blocking
-  AssignBondOrdersFromTemplate for 100% of poses. Cell 5 RMSD
-  reference rebuilt as AssignBondOrdersFromTemplate(master_ref,
-  native_mol) so crystal positions are kept while topology comes
-  from the canonical ideal SDF. Cell 5 ligand-code resolution is
-  now GraphQL-primary with mol2-candidate fallback (see
-  extract_ligand_code_candidates_from_mol2). Master-template-source
-  log line is at WARNING level for diagnostic visibility in Colab.
-- fpocket coordinate regex: robust scientific notation pattern sourced
-  from config
-- Phase 3 regression (ideal SDF primary template): the original ideal-SDF
-  integration passed topology_template_path as the highest-priority
-  template, causing 100% AssignBondOrdersFromTemplate failures on simple
-  ligands (biotin, streptavidin, etc.) whose obabel-perceived mol2 differs
-  from RCSB canonical chemistry. Fixed by defaulting to crystal mol2 as
-  primary (reference_ligand_path) and demoting the ideal SDF to
-  fallback_topology_path, activated only when fail rate exceeds
-  cfg.bond_order_fallback_threshold (0.5). Rename also updated in
-  ConsensusAnalyzer.__init__ and _run_pipeline().
-- Cluster ranking instability: clusters with equal size were sorted by
-  size alone, causing non-deterministic best-cluster selection between
-  runs when two clusters tied on pose count (1OWE: 0.23 Å ↔ 8.86 Å
-  flip). Fixed by multi-key sort: Num_Engines DESC, Size DESC,
-  intra-RMSD ASC in _summarize_clusters().
-- Post-clustering valence crash (1HXW): Chem.RemoveHs() on an engine
-  output pose raised ValueError ("Explicit valence for atom N, 4")
-  and escaped run_from_local(), discarding the cluster_df and analyzer
-  that would have been useful for inspection. Wrapped the entire
-  post-clustering block in try/except Exception; failures now return
-  TargetResult(status="Error", error_message=f"{type(e).__name__}: {e}")
-  with cluster_df and analyzer preserved.
-- TargetResult.error_message: added str field (default "") that captures
-  the exception type and message on Status=Error, surfacing failures in
-  run_history.csv without requiring log inspection.
-- Auto-retry with ideal SDF (Class C): analyze_ensemble() unpacks a
-  3-tuple (poses, metadata, fail_rate) from _load_and_standardize(). If
-  fail_rate > cfg.bond_order_fallback_threshold and fallback_topology_path
-  is set, master_ref is swapped to the ideal SDF and standardization is
-  re-run in-memory (~2 s, no re-docking). Both the trigger and outcome
-  are logged at WARNING level for auditability.
-- bond_order_fallback_threshold: new ConsensusConfig field (default 0.5)
-  replacing the inline 0.5 literal; governs the Class C retry trigger.
-
 ---
 
 ## Coding Standards
@@ -492,7 +394,7 @@ Standard levels:
 
 ## External Dependencies
 
-### Python (see requirements.txt and environment.yml)
+### Python (see requirements.txt and pyproject.toml)
 
 Core: rdkit, openbabel-wheel, py3Dmol, hdbscan, numpy, pandas, requests
 Dev:  pytest, pytest-cov

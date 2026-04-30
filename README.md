@@ -212,6 +212,30 @@ Per-target aggregate statistics (success rate, pass rate, best RMSD) are also di
 
 ---
 
+## Development Notes
+
+The pipeline runs exclusively on **Google Colab** (Linux x86-64). Local setup via `pip install -r requirements.txt` supports editing and linting only — functional testing requires a Colab session with GPU runtime.
+
+**Running tests locally:**
+```bash
+pytest tests/ -v
+```
+Note: the test suite currently covers imports and structure only. All functional validation runs through Colab Cell 5.
+
+**Commit conventions:** `feat:` / `fix:` / `docs:` / `test:` / `refactor:` prefixes. Stage specific files rather than `git add -A`.
+
+**Non-negotiable coding rules for all `src/` changes:**
+- No bare `except` — always catch specific exceptions with a logged diagnostic
+- No magic numbers — all constants in `config.py` as named dataclass fields
+- No `os.chdir()` — use `cwd=` in subprocess calls
+- No hardcoded `/content/` paths — all paths from constructor arguments or config
+- No duplicate imports — one import per dependency at the top of the file
+- No silent exception swallowing — every caught exception must be logged
+
+Type hints are required on all function signatures. f-strings only — no `%` or `.format()`. See `CLAUDE.md` for the full coding standards reference.
+
+---
+
 ## References and Citations
 
 The PoseAI framework integrates several peer-reviewed docking engines and bioinformatics libraries. Please cite the following primary literature when utilizing this pipeline for research or analysis:

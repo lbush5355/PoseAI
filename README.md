@@ -10,6 +10,68 @@ Developed as a course project for CHEM 4640 at the University of Colorado Denver
 
 ---
 
+## Reproducibility Instructions
+
+To ensure complete reproducibility of the pipeline and batch validation results, follow these steps in order.
+
+### 1. Runtime Environment
+
+PoseAI is designed exclusively for **Google Colab** with a **GPU runtime**. An NVIDIA A100 is recommended to reproduce published benchmark times; a T4 will work but Gnina's CNN-scoring path will be slower. The docking engine binaries are Linux x86-64 ELF files and cannot run on macOS or Windows. All Python source modules are cloned automatically from GitHub at session start, with no manual file uploads required.
+
+1. Open `PoseAI.ipynb` in Google Colab.
+2. Go to **Runtime > Change runtime type** and select a **GPU** hardware accelerator (required for Gnina's CNN-scoring path).
+3. Execute cells sequentially from **Step 1 to Step 5**.
+
+### 2. Cloud Storage Setup (dataset only)
+
+Source code is cloned from GitHub automatically. Only the dataset must be placed on Drive:
+
+1. Log into your Google account and open Google Drive.
+2. Create a root directory named `PoseAI` at `MyDrive/PoseAI`.
+3. Upload the `dataset/` directory to `MyDrive/PoseAI/dataset/`.
+
+> **Note:** Do **not** upload `src/` to Drive. Step 1 clones the latest `src/` modules directly from GitHub (`lbush5355/PoseAI`, branch `main`) into the Colab session on every startup.
+
+### 3. Expected Dataset Structure
+
+For batch validation to function, the `dataset/` directory must follow standard PDBbind naming conventions. Each target requires a subfolder with a protein PDB and a ligand mol2. PDBQT files are generated automatically by the pipeline if absent.
+
+```text
+MyDrive/PoseAI/
+└── dataset/
+    ├── 1ett/
+    │   ├── 1ett_protein.pdb      (required)
+    │   └── 1ett_ligand.mol2      (required)
+    ├── 1owe/
+    │   ├── 1owe_protein.pdb
+    │   └── 1owe_ligand.mol2
+    └── ...
+```
+
+The full set of gold-standard targets is: `1ett`, `1owe`, `1a30`, `1stp`, `1hxw`, `1iep`, `1fjs`, `1hsg`.
+
+### 4. Automated Dependency Management
+
+**Step 1** of the notebook automatically:
+
+*   Mounts your Google Drive to access the `PoseAI` directory.
+*   Clones the `PoseAI` repository from GitHub and copies `src/*.py` into the Colab session.
+*   Installs required Python libraries (`rdkit`, `py3Dmol`, `hdbscan`, etc.).
+*   Adds 32-bit (`i386`) architecture support to the Colab Ubuntu instance (the LeDock and lepro binaries are 32-bit legacy ELFs).
+*   Downloads Smina, Gnina, LeDock, lepro, and fpocket; validates each download as a well-formed x86-64 ELF before allowing it to be invoked.
+
+### 5. Validation Protocol
+
+**Step 5: Local Dataset Batch Validation** benchmarks the pipeline against all targets in `dataset/`. For each target it runs ensemble docking, consensus clustering, and RMSD grading, then outputs:
+
+*   `batch_summary.csv`: per-target status and RMSD for this run
+*   `run_history.csv`: cumulative per-target statistics across all sessions (success rate, best RMSD)
+*   3D `.html` visualization files in `batch_results/<TARGET>/`
+
+Per-target aggregate statistics (success rate, pass rate, best RMSD) are also displayed inline at the end of Step 5 without leaving the notebook.
+
+---
+
 ## System Architecture
 
 The pipeline is composed of distinct functional modules in the `src/` directory:
@@ -44,6 +106,8 @@ The following directions advance PoseAI from a validated redocking pipeline towa
 - **Functional test coverage:** no test suite currently exists. Priority targets: `_summarize_clusters()` deterministic sort, `_load_dok()` multi-pose recovery, `analyze_ensemble()` Class C retry trigger, and `_grade_rmsd()` boundary conditions (all mockable without running docking engines).
 - **Pipeline checkpointing:** save intermediate results after preprocessing, docking, and clustering so a crash does not discard all work for a target.
 - **`max_engines_for_consensus` config parameter:** the confidence score denominator is hardcoded to 3.0; adding a fourth engine without updating source silently caps its contribution.
+
+---
 
 ### Path to Publication
 
@@ -135,68 +199,6 @@ Key parameters for batch validation:
 | `preprocessor.rcsb_timeout_s` | 30 s | HTTP timeout for RCSB structure and SDF downloads |
 
 `EXHAUSTIVENESS` and `POSES_PER_ENGINE` are set as notebook variables in Cell 5 and passed through `PipelineParams` rather than `PoseAIConfig`.
-
----
-
-## Reproducibility Instructions (For Evaluation & Grading)
-
-To ensure complete reproducibility of the pipeline and batch validation results, follow these steps in order.
-
-### 1. Runtime Environment
-
-PoseAI is designed exclusively for **Google Colab** with a **GPU runtime**. An NVIDIA A100 is recommended to reproduce published benchmark times; a T4 will work but Gnina's CNN-scoring path will be slower. The docking engine binaries are Linux x86-64 ELF files and cannot run on macOS or Windows. All Python source modules are cloned automatically from GitHub at session start, with no manual file uploads required.
-
-1. Open `PoseAI.ipynb` in Google Colab.
-2. Go to **Runtime > Change runtime type** and select a **GPU** hardware accelerator (required for Gnina's CNN-scoring path).
-3. Execute cells sequentially from **Step 1 to Step 5**.
-
-### 2. Cloud Storage Setup (dataset only)
-
-Source code is cloned from GitHub automatically. Only the dataset must be placed on Drive:
-
-1. Log into your Google account and open Google Drive.
-2. Create a root directory named `PoseAI` at `MyDrive/PoseAI`.
-3. Upload the `dataset/` directory to `MyDrive/PoseAI/dataset/`.
-
-> **Note:** Do **not** upload `src/` to Drive. Step 1 clones the latest `src/` modules directly from GitHub (`lbush5355/PoseAI`, branch `main`) into the Colab session on every startup.
-
-### 3. Expected Dataset Structure
-
-For batch validation to function, the `dataset/` directory must follow standard PDBbind naming conventions. Each target requires a subfolder with a protein PDB and a ligand mol2. PDBQT files are generated automatically by the pipeline if absent.
-
-```text
-MyDrive/PoseAI/
-└── dataset/
-    ├── 1ett/
-    │   ├── 1ett_protein.pdb      (required)
-    │   └── 1ett_ligand.mol2      (required)
-    ├── 1owe/
-    │   ├── 1owe_protein.pdb
-    │   └── 1owe_ligand.mol2
-    └── ...
-```
-
-The full set of gold-standard targets is: `1ett`, `1owe`, `1a30`, `1stp`, `1hxw`, `1iep`, `1fjs`, `1hsg`.
-
-### 4. Automated Dependency Management
-
-**Step 1** of the notebook automatically:
-
-*   Mounts your Google Drive to access the `PoseAI` directory.
-*   Clones the `PoseAI` repository from GitHub and copies `src/*.py` into the Colab session.
-*   Installs required Python libraries (`rdkit`, `py3Dmol`, `hdbscan`, etc.).
-*   Adds 32-bit (`i386`) architecture support to the Colab Ubuntu instance (the LeDock and lepro binaries are 32-bit legacy ELFs).
-*   Downloads Smina, Gnina, LeDock, lepro, and fpocket; validates each download as a well-formed x86-64 ELF before allowing it to be invoked.
-
-### 5. Validation Protocol
-
-**Step 5: Local Dataset Batch Validation** benchmarks the pipeline against all targets in `dataset/`. For each target it runs ensemble docking, consensus clustering, and RMSD grading, then outputs:
-
-*   `batch_summary.csv`: per-target status and RMSD for this run
-*   `run_history.csv`: cumulative per-target statistics across all sessions (success rate, best RMSD)
-*   3D `.html` visualization files in `batch_results/<TARGET>/`
-
-Per-target aggregate statistics (success rate, pass rate, best RMSD) are also displayed inline at the end of Step 5 without leaving the notebook.
 
 ---
 
